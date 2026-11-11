@@ -7,12 +7,14 @@ Auth (no network, no Supabase):
 
 API clients:
   api_client_nodb    TestClient without a database (auth/RBAC/envelope tests).
-  api_client         TestClient on DB `anticipa_test`; every request runs in the test's rolled-back transaction.
+  api_client         TestClient on DB `anticipa_test`; every request runs in the test's rolled-back
+  transaction.
 
 Database (integration; skipped when local Postgres is unreachable):
   test_engine        session-scoped; creates DB `anticipa_test` if missing and migrates it to head. It never
                      touches the dev database `anticipa`, and refuses non-local servers.
-  db_session         Session in a transaction that is rolled back after the test (commit() only releases a SAVEPOINT).
+  db_session         Session in a transaction that is rolled back after the test (commit() only releases a
+  SAVEPOINT).
 
 Tests that use `test_engine`, `db_session` or `api_client` are marked `integration` automatically.
 """
@@ -28,7 +30,6 @@ from typing import Any
 import jwt
 import psycopg
 import pytest
-from alembic import command
 from alembic.config import Config
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
@@ -39,6 +40,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import URL, Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
+from alembic import command
 from anticipa.config import ConfigError, Settings, get_settings
 from anticipa.core import auth as core_auth
 from anticipa.db import make_engine
@@ -131,7 +133,9 @@ def mint_token(jwks: JwksStub) -> Callable[..., str]:
             "sub": str(sub or role_user_id(role or "norole")),
             "email": email or f"{role or 'norole'}@example.test",
             "iat": now,
-            "app_metadata": app_metadata if app_metadata is not None else ({"anticipa_role": role} if role else {}),
+            "app_metadata": app_metadata
+            if app_metadata is not None
+            else ({"anticipa_role": role} if role else {}),
             "user_metadata": user_metadata or {},
         }
         if aud is not None:
@@ -162,10 +166,14 @@ def auth_headers(mint_token: Callable[..., str]) -> Callable[[str], dict[str, st
 
 
 @pytest.fixture
-def api_client_nodb(test_settings: Settings, jwks: JwksStub, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+def api_client_nodb(
+    test_settings: Settings, jwks: JwksStub, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[TestClient]:
     """App wired to an engine that is never connected; the profile upsert is stubbed out."""
     monkeypatch.setattr(core_auth, "touch_profile", lambda *args, **kwargs: None)
-    engine = create_engine("postgresql+psycopg://nobody:nobody@127.0.0.1:1/none")  # connection refused if ever used
+    engine = create_engine(
+        "postgresql+psycopg://nobody:nobody@127.0.0.1:1/none"
+    )  # connection refused if ever used
     with TestClient(create_app(test_settings, engine=engine), raise_server_exceptions=False) as client:
         yield client
     engine.dispose()
@@ -194,12 +202,19 @@ def _ensure_test_database(url: URL) -> None:
     assert url.database == TEST_DB_NAME  # never operate on any other database
     admin = url.set(database="postgres")
     conninfo = psycopg.conninfo.make_conninfo(
-        host=admin.host, port=admin.port, user=admin.username, password=admin.password, dbname="postgres", connect_timeout=5
+        host=admin.host,
+        port=admin.port,
+        user=admin.username,
+        password=admin.password,
+        dbname="postgres",
+        connect_timeout=5,
     )
     try:
         conn = psycopg.connect(conninfo, autocommit=True)
     except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not reachable ({type(exc).__name__}); start it with `docker compose up -d postgres`")
+        pytest.skip(
+            f"Postgres is not reachable ({type(exc).__name__}); start it with `docker compose up -d postgres`"
+        )
     with conn:
         conn.execute("SELECT pg_advisory_lock(%s)", (SETUP_LOCK_KEY,))
         try:

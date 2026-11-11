@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib
+import importlib.util
 import logging
 import signal
 import sys
@@ -12,6 +14,7 @@ from pathlib import Path
 
 from anticipa.config import ConfigError, get_settings
 from anticipa.core.logging import configure_logging
+from anticipa.core.modules import MODULES
 
 log = logging.getLogger("anticipa.cli")
 ALEMBIC_DIR = (
@@ -20,9 +23,11 @@ ALEMBIC_DIR = (
 
 
 def cmd_worker(args: argparse.Namespace) -> int:
+    from anticipa.ai import DbSink, configure_router
     from anticipa.db import get_sessionmaker
     from anticipa.jobs.worker import WorkerConfig, run_worker
 
+    configure_router(sink=DbSink(get_sessionmaker()))  # model calls made by job handlers are logged too
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
@@ -89,9 +94,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def module_clis() -> dict[str, str]:
+    """`anticipa/<module>/cli.py` files exposing `main(argv)`, mounted as `anticipa <module> ...`
+    (`datafabric.docgen` is mounted as `docgen`)."""
+    found = {}
+    for module in MODULES:
+        path = f"anticipa.{module}.cli"
+        if importlib.util.find_spec(path) is not None:
+            found[module.rsplit(".", 1)[-1]] = path
+    return found
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    argv = sys.argv[1:] if argv is None else argv
+    mounted = module_clis()
     try:
+        if argv and argv[0] in mounted:  # delegate: the module owns its sub-commands and flags
+            return importlib.import_module(mounted[argv[0]]).main(argv[1:]) or 0
+        parser = build_parser()
+        parser.epilog = "module commands: " + ", ".join(f"{n} (anticipa {n} --help)" for n in sorted(mounted))
+        args = parser.parse_args(argv)
         configure_logging(get_settings().log_level)
         return args.func(args)
     except ConfigError as exc:

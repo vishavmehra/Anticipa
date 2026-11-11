@@ -1,0 +1,12 @@
+# Allow-list: the build context is the repo root, which holds .env, data/ (GBs), tools/, Docs/, frontend/ ...
+# None of those may enter the image or even the build context. (BuildKit reads <Dockerfile>.dockerignore first.)
+*
+!backend/pyproject.toml
+!backend/uv.lock
+!backend/alembic.ini
+!backend/alembic
+!backend/anticipa
+!config
+config/synthea
+**/__pycache__
+**/*.pyc

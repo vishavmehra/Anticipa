@@ -8,15 +8,21 @@ from anticipa.core import rbac
 
 
 def test_every_role_has_an_explicit_entry():
-    assert set(rbac.ROLES) == {"population_admin", "care_coordinator", "clinical_reviewer", "system_admin", "observer"}
+    assert set(rbac.ROLES) == {
+        "population_admin",
+        "care_coordinator",
+        "clinical_reviewer",
+        "system_admin",
+        "observer",
+    }
     assert set(rbac.ROLE_PERMISSIONS) == set(rbac.ROLES)
 
 
-def test_observer_holds_exactly_the_plain_view_permissions():
+def test_observer_holds_every_view_permission_except_the_unredacted_audit_trail():
     observer = rbac.permissions_for("observer")
-    assert observer == {p for p in rbac.ALL_PERMISSIONS if p.endswith(".view")}
-    assert observer == rbac.PLAIN_VIEW_PERMISSIONS
-    assert "audit.view" in observer and "integrations.view" in observer
+    plain_views = {p for p in rbac.ALL_PERMISSIONS if p.endswith(".view")}
+    assert observer == (plain_views - {"audit.view"}) | {"audit.view_redacted"}
+    assert "integrations.view" in observer and "audit.view" not in observer
 
 
 def test_observer_has_no_state_changing_permission():
@@ -24,8 +30,14 @@ def test_observer_has_no_state_changing_permission():
     assert state_changing, "expected at least one state-changing permission to exist"
     assert not rbac.permissions_for("observer") & state_changing
     for name in rbac.permissions_for("observer"):
-        assert name.endswith(".view"), name
-    for forbidden in ("processing.execute", "caregaps.manage", "caregaps.close", "evidence.review", "system.configure"):
+        assert name.endswith((".view", ".view_redacted")), name
+    for forbidden in (
+        "processing.execute",
+        "caregaps.manage",
+        "caregaps.close",
+        "evidence.review",
+        "system.configure",
+    ):
         assert not rbac.has_permission("observer", forbidden)
 
 

@@ -15,7 +15,7 @@ from types import ModuleType
 log = logging.getLogger(__name__)
 
 MODULES = (
-    "datafabric", "ai", "evidence", "guidelines", "caregaps", "planning",
+    "datafabric", "datafabric.docgen", "ai", "evidence", "guidelines", "caregaps", "planning",
     "engagement", "closure", "analytics", "evaluation",
 )  # fmt: skip
 

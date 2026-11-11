@@ -1,18 +1,14 @@
-"""Explicit role -> permission map (05 §4.3, ADR-060). Deny by default; scope limits ("assigned", "review")
-are enforced
-by the owning module on top of these permissions. Later waves extend ROLE_PERMISSIONS here, never with ad-hoc
-role checks.
+"""Explicit role -> permission map (05 §4.3, ADR-060). Deny by default; scope limits ("assigned",
+"review") are enforced by the owning module on top of these permissions. Later waves extend
+ROLE_PERMISSIONS here, never with ad-hoc role checks.
 
-Naming makes read-only explicit: `<module>.view` (and `*.view_limited/_scoped/_redacted`) only read; anything
-that
-changes state, reviews, approves, closes, configures or triggers processing/AI uses
-`.manage/.review/.approve/.close/
-.execute/.configure`. The `observer` role (hackathon judges, ADR-060) holds exactly the plain `*.view`
-permissions.
+Naming makes read-only explicit: `<module>.view` (and `*.view_limited/_scoped/_redacted`) only read;
+anything that changes state, reviews, approves, closes, configures or triggers processing/AI uses
+`.manage/.review/.approve/.close/.execute/.configure`. The `observer` role (hackathon judges, ADR-060)
+holds only view-style permissions, with the audit trail redacted (`audit.view_redacted`).
 
-Mapping of the 05 §4.3 qualifiers:  Yes/Authorized -> full permission;  Limited/scoped -> the
-`*_limited`/`*_scoped`
-variant;  "No by default" -> not granted (grant explicitly if the owner decides).
+Mapping of the 05 §4.3 qualifiers: Yes/Authorized -> full permission; Limited/scoped -> the
+`*_limited`/`*_scoped` variant; "No by default" -> not granted (grant explicitly if the owner decides).
 """
 
 from __future__ import annotations
@@ -49,6 +45,7 @@ JOBS_VIEW = "jobs.view"
 INTEGRATIONS_VIEW = "integrations.view"
 AUDIT_VIEW = "audit.view"
 AUDIT_VIEW_SCOPED = "audit.view_scoped"  # own actions only
+AUDIT_VIEW_REDACTED = "audit.view_redacted"  # all events, without actor ids / request ids / details
 
 # --- state-changing permissions
 # --------------------------------------------------------------------------------
@@ -66,7 +63,7 @@ SYSTEM_CONFIGURE = "system.configure"
 VIEW_PERMISSIONS: frozenset[str] = frozenset({
     ANALYTICS_VIEW, ANALYTICS_VIEW_LIMITED, RESIDENTS_VIEW, RECORDS_VIEW, DOCUMENTS_VIEW, EVIDENCE_VIEW,
     GUIDELINES_VIEW, RULES_VIEW, CAREGAPS_VIEW, CAPACITY_VIEW, ENGAGEMENT_VIEW, APPOINTMENTS_VIEW,
-    CLOSURE_VIEW, JOBS_VIEW, INTEGRATIONS_VIEW, AUDIT_VIEW, AUDIT_VIEW_SCOPED,
+    CLOSURE_VIEW, JOBS_VIEW, INTEGRATIONS_VIEW, AUDIT_VIEW, AUDIT_VIEW_SCOPED, AUDIT_VIEW_REDACTED,
 })  # fmt: skip
 
 _ADMIN_VIEWS = {
@@ -74,7 +71,6 @@ _ADMIN_VIEWS = {
     RULES_VIEW, CAREGAPS_VIEW, CAPACITY_VIEW, ENGAGEMENT_VIEW, APPOINTMENTS_VIEW, CLOSURE_VIEW,
     JOBS_VIEW, INTEGRATIONS_VIEW,
 }  # fmt: skip
-PLAIN_VIEW_PERMISSIONS: frozenset[str] = frozenset(p for p in VIEW_PERMISSIONS if p.endswith(".view"))
 
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     Role.POPULATION_ADMIN: frozenset(
@@ -95,8 +91,8 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         CAREGAPS_VIEW, CAPACITY_VIEW, ENGAGEMENT_VIEW, APPOINTMENTS_VIEW, CLOSURE_VIEW, JOBS_VIEW,
         INTEGRATIONS_VIEW, AUDIT_VIEW, PROCESSING_EXECUTE, CAPACITY_MANAGE, CAREGAPS_MANAGE, SYSTEM_CONFIGURE,
     }),
-    # Hackathon judges (ADR-060): everything can be seen, nothing can be changed or triggered.
-    Role.OBSERVER: PLAIN_VIEW_PERMISSIONS,
+    # Hackathon judges (ADR-060): everything can be seen (audit trail redacted), nothing can be changed.
+    Role.OBSERVER: frozenset(_ADMIN_VIEWS | {AUDIT_VIEW_REDACTED}),
 }  # fmt: skip
 
 ALL_PERMISSIONS: frozenset[str] = frozenset().union(*ROLE_PERMISSIONS.values())

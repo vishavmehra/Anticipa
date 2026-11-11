@@ -73,7 +73,7 @@ def submit_job(
 
 
 def get_job(session: Session, job_id: uuid.UUID, *, for_update: bool = False) -> ProcessingJob:
-    job = session.get(ProcessingJob, job_id, with_for_update=for_update)
+    job = session.get(ProcessingJob, job_id, with_for_update=for_update, populate_existing=for_update)
     if job is None:
         raise NotFound("Job not found.")
     return job

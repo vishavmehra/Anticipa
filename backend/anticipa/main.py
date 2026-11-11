@@ -13,6 +13,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from fastapi import FastAPI
 
+from anticipa.ai import DbSink, configure_router
 from anticipa.api.errors import install_exception_handlers
 from anticipa.api.middleware import RequestContextMiddleware
 from anticipa.api.router import build_api_router
@@ -34,6 +35,7 @@ except PackageNotFoundError:  # running from a source tree without an installed 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
+    configure_router(sink=DbSink(app.state.sessionmaker))  # every model call is logged to model_invocations
     worker: EmbeddedWorker | None = None
     if settings.embedded_worker:
         worker = EmbeddedWorker(app.state.sessionmaker, WorkerConfig.from_settings(settings))

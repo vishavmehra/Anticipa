@@ -36,7 +36,10 @@ def test_tokens_in_cookies_or_query_strings_are_ignored(api_client_nodb, mint_to
     for cookie in ("access_token", "sb-test-project-auth-token", "token"):
         api_client_nodb.cookies.set(cookie, token)
     assert api_client_nodb.get("/api/v1/auth/me").status_code == 401
-    assert api_client_nodb.get("/api/v1/auth/me", params={"access_token": token, "token": token}).status_code == 401
+    assert (
+        api_client_nodb.get("/api/v1/auth/me", params={"access_token": token, "token": token}).status_code
+        == 401
+    )
 
 
 def test_invalid_token_is_401_and_not_echoed(api_client_nodb):
@@ -53,12 +56,18 @@ def test_user_without_a_role_is_403(api_client_nodb, mint_token):
 
 def test_role_only_in_user_metadata_is_403(api_client_nodb, mint_token):
     token = mint_token(None, app_metadata={}, user_metadata={"anticipa_role": "system_admin"})
-    assert api_client_nodb.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 403
+    assert (
+        api_client_nodb.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code
+        == 403
+    )
 
 
 def test_expired_token_is_401(api_client_nodb, mint_token):
     token = mint_token("observer", expires_in=-600)
-    assert api_client_nodb.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+    assert (
+        api_client_nodb.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code
+        == 401
+    )
 
 
 def test_unreachable_jwks_is_503_envelope(api_client_nodb, jwks, mint_token):

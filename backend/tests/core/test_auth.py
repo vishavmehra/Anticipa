@@ -24,7 +24,9 @@ pytestmark = pytest.mark.usefixtures("jwks")
 def test_valid_token_yields_user_with_role_from_app_metadata(mint_token, test_settings):
     sub = uuid.uuid4()
     user = authenticate_token(
-        mint_token("care_coordinator", sub=sub, email="c@example.test", user_metadata={"display_name": "Casey"}),
+        mint_token(
+            "care_coordinator", sub=sub, email="c@example.test", user_metadata={"display_name": "Casey"}
+        ),
         test_settings,
     )
     assert user.id == sub and user.email == "c@example.test" and user.role == "care_coordinator"
@@ -75,7 +77,9 @@ def test_invalid_claims_are_rejected(mint_token, test_settings, overrides):
 def test_token_signed_by_another_key_is_rejected(mint_token, test_settings):
     attacker = ec.generate_private_key(ec.SECP256R1())
     with pytest.raises(Unauthenticated):
-        authenticate_token(mint_token("system_admin", key=attacker), test_settings)  # same kid, wrong signature
+        authenticate_token(
+            mint_token("system_admin", key=attacker), test_settings
+        )  # same kid, wrong signature
 
 
 def test_unknown_kid_is_rejected(mint_token, test_settings):
@@ -84,7 +88,8 @@ def test_unknown_kid_is_rejected(mint_token, test_settings):
 
 
 def test_hs256_signed_with_the_public_key_is_rejected(jwks, test_settings):
-    """Algorithm-confusion attack: HS256 with the (public) key bytes as the shared secret (PyJWT refuses to sign
+    """Algorithm-confusion attack: HS256 with the (public) key bytes as the shared secret (PyJWT refuses to
+    sign
     that, so the token is assembled by hand)."""
     public_pem = jwks.private_key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
 

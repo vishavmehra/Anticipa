@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+/* Design tokens live here (this file is the source of truth). Chromatic colour is reserved for status and
+   the "not real" (specimen) semantic; the brand itself is near-monochrome spruce + ink. State pairs are AA
+   (>= 4.5:1 fg on bg); the specimen hatch is always paired with a text label. */
+@theme {
+  --color-paper: #f1f4f5;
+  --color-surface: #ffffff;
+  --color-line: #d3dbdf;
+  --color-line-strong: #7f8f97;
+  --color-ink: #13262e;
+  --color-ink-muted: #4a5c65;
+  --color-spruce: #12303a;
+  --color-spruce-hover: #1d4453;
+  --color-link: #0b6475;
+
+  --color-ok: #14582d;
+  --color-ok-bg: #e1f1e6;
+  --color-warn: #6b4300;
+  --color-warn-bg: #fcebc5;
+  --color-danger: #9b1c1c;
+  --color-danger-bg: #fbe3e1;
+  --color-info: #164e8a;
+  --color-info-bg: #e1ecf8;
+  --color-neutral: #3f505a;
+  --color-neutral-bg: #e6ebed;
+  --color-specimen: #3b2570;
+  --color-specimen-bg: #ece6f7;
+  --color-mark: #ffe08a;
+
+  --radius-sm: 3px;
+  --radius-md: 5px;
+}
+
+@theme inline {
+  --font-sans: var(--font-plex), var(--font-plex-arabic), var(--font-plex-deva), ui-sans-serif,
+    system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "Cascadia Mono", monospace;
+}
+
+:root {
+  color-scheme: light;
+  --banner-h: 2.25rem;
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-link);
+  outline-offset: 2px;
+}
+.on-spruce :focus-visible {
+  outline-color: #8fd3e3;
+}
+
+/* Diagonal hatch = "specimen": synthetic/simulated content. Pattern + text, never colour alone. */
+.hatch {
+  background-image: repeating-linear-gradient(
+    135deg,
+    transparent 0 5px,
+    rgb(59 37 112 / 0.14) 5px 6px
+  );
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes pulse-row {
+  50% {
+    opacity: 0.45;
+  }
+}
+.skeleton {
+  background: var(--color-neutral-bg);
+  border-radius: var(--radius-sm);
+  animation: pulse-row 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+  * {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

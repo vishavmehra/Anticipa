@@ -1,0 +1,63 @@
+# Anticipa local infrastructure (synthetic data only). Secrets/overrides come from the repo-root .env.
+#   docker compose up -d postgres hapi            # core services
+#   docker compose --profile terminology up -d icd11   # optional local WHO ICD-11 API (large image)
+# Host ports bind to 127.0.0.1 only. Dev defaults below mirror .env.example and are NOT secrets.
+name: anticipa
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg17 # PostgreSQL 17 + pgvector 0.8.7 (verified by pull 2026-11-06)
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-anticipa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-anticipa-dev-only}
+      POSTGRES_DB: ${POSTGRES_DB:-anticipa}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - anticipa_pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  hapi:
+    build:
+      context: docker/hapi
+    image: anticipa/hapi:v8.12.0-2 # local build of hapiproject/hapi:v8.12.0-2 + busybox wget (see docker/hapi/Dockerfile)
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8090:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/hapi
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-anticipa}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-anticipa-dev-only}
+      SPRING_DATASOURCE_DRIVERCLASSNAME: org.postgresql.Driver
+      SPRING_JPA_PROPERTIES_HIBERNATE_DIALECT: ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect
+      HAPI_FHIR_FHIR_VERSION: R4
+      JAVA_TOOL_OPTIONS: -Xms256m -Xmx1536m
+    healthcheck:
+      test: ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/fhir/metadata?_summary=true"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+
+  icd11:
+    profiles: ["terminology"]
+    image: whoicd/icd-api:2.6.0 # tag verified to exist on Docker Hub; container not started during foundation verification
+    restart: unless-stopped
+    environment:
+      acceptLicense: "true" # accepting the WHO ICD-11 licence terms (https://icd.who.int/en/docs/icd11-license.pdf)
+      saveAnalytics: "false"
+    ports:
+      - "127.0.0.1:8095:80"
+
+volumes:
+  anticipa_pgdata:

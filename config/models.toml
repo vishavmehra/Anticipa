@@ -1,0 +1,119 @@
+# Anticipa Model Router configuration (ADR-021/022/023). Non-secret; secrets live in repo-root .env.
+# Every model id below is checked at router start-up against config/provider_catalogue.json
+# (live-verified snapshot, regenerate with scripts/check_providers.py). Meta/llama models are rejected.
+# Only two providers are permitted: "anthropic" and "nebius". Routes list candidates in fallback order,
+# written "provider:model_id". Fallback re-applies schema validation; a "refusal" never falls back.
+
+[router]
+catalogue_snapshot = "provider_catalogue.json"  # relative to this directory
+repair_attempts = 1          # extra "return corrected JSON" turns on the SAME candidate before falling back
+backoff_base_s = 1.0         # transport retries: min(backoff_max_s, base * 2^n) with jitter, honours retry-after
+backoff_max_s = 30.0
+retry_after_cap_s = 60.0     # never sleep longer than this on a retry-after header
+
+[providers.anthropic]
+timeout_s = 120
+max_retries = 2              # router-level retries per candidate (SDK retries are disabled)
+max_concurrency = 8
+
+[providers.nebius]
+base_url = "https://api.tokenfactory.nebius.com/v1/"   # NEBIUS_BASE_URL in .env overrides
+timeout_s = 120
+max_retries = 2
+max_concurrency = 16
+
+# ---- Models: prices are USD per million tokens, verified_on = date the price/id was checked ----
+# Anthropic prices: skill model table 2026-10-06 (prompts <= 100k tokens). Cache read prices: opus-5-5 and
+# sonnet-5-5 as published ($0.20); haiku-5-5 derived as 0.1x input. Cache write = 1.25x input (5 min TTL).
+# Nebius prices: copied from the live catalogue (pricing.prompt / completion / input_cache_read x 1e6).
+
+[[models]]
+provider = "anthropic"
+id = "claude-opus-5-5"
+kind = "chat"
+input_per_mtok = 4.00
+output_per_mtok = 20.00
+cache_read_per_mtok = 0.20
+cache_write_per_mtok = 5.00
+verified_on = "2026-11-06"
+
+[[models]]
+provider = "anthropic"
+id = "claude-sonnet-5-5"
+kind = "chat"
+input_per_mtok = 2.00
+output_per_mtok = 10.00
+cache_read_per_mtok = 0.20
+cache_write_per_mtok = 2.50
+verified_on = "2026-11-06"
+
+[[models]]
+provider = "anthropic"
+id = "claude-haiku-5-5"
+kind = "chat"
+input_per_mtok = 0.10
+output_per_mtok = 0.50
+cache_read_per_mtok = 0.01
+cache_write_per_mtok = 0.125
+verified_on = "2026-11-06"
+
+[[models]]
+provider = "nebius"
+id = "Qwen/Qwen3-235B-A22B-Instruct-2507"
+kind = "chat"
+structured_output = "json_schema"   # catalogue supported_features: structured_outputs, json_mode (live check: see handoff)
+input_per_mtok = 0.20
+output_per_mtok = 0.60
+cache_read_per_mtok = 0.05
+verified_on = "2026-11-06"
+
+[[models]]
+provider = "nebius"
+id = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+kind = "chat"
+structured_output = "json_schema"
+input_per_mtok = 0.10
+output_per_mtok = 0.30
+cache_read_per_mtok = 0.10
+verified_on = "2026-11-06"
+
+[[models]]
+provider = "nebius"
+id = "Qwen/Qwen3-Embedding-8B"
+kind = "embedding"
+native_dimensions = 4096            # honours `dimensions` (Matryoshka); 1024 verified live 2026-11-06
+input_per_mtok = 0.01
+output_per_mtok = 0.0
+verified_on = "2026-11-06"
+
+# ---- Task routes ----
+# effort: Claude output_config.effort (claude-opus-5-5 cannot disable thinking; effort is the depth control).
+# temperature: sent to Nebius only (Claude 5.5 models reject sampling parameters).
+
+[tasks."evidence.extract"]            # bulk extraction: cheap open model first, Claude Haiku as fallback
+kind = "chat"
+candidates = ["nebius:Qwen/Qwen3-235B-A22B-Instruct-2507", "anthropic:claude-haiku-5-5"]
+effort = "low"
+temperature = 0.0
+
+[tasks."evidence.extract.complex"]    # ambiguous / multilingual / family-history documents
+kind = "chat"
+candidates = ["anthropic:claude-sonnet-5-5", "anthropic:claude-opus-5-5"]
+effort = "high"
+
+[tasks."evidence.review"]             # quality review of extraction results (assistive only)
+kind = "chat"
+candidates = ["anthropic:claude-opus-5-5"]
+effort = "high"
+
+[tasks."engagement.draft"]            # resident-message drafting (requires approval downstream)
+kind = "chat"
+candidates = ["anthropic:claude-haiku-5-5", "nebius:Qwen/Qwen3-30B-A3B-Instruct-2507"]
+effort = "low"
+temperature = 0.3
+
+[tasks."embedding.document"]
+kind = "embedding"
+candidates = ["nebius:Qwen/Qwen3-Embedding-8B"]
+dimensions = 1024                     # pgvector vector(1024); HNSW limit is 2000
+batch_size = 64

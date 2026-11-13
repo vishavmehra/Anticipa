@@ -46,13 +46,15 @@ def migration_head() -> str | None:
     return ScriptDirectory.from_config(cfg).get_current_head()
 
 
-@router.get("/health", response_model=Envelope[Liveness], summary="Liveness")
+# GET and HEAD: uptime monitors (e.g. UptimeRobot) probe with HEAD by default.
+@router.api_route("/health", methods=["GET", "HEAD"], response_model=Envelope[Liveness], summary="Liveness")
 def health(request: Request) -> Envelope[Liveness]:
     return ok(request, Liveness(status="ok"))
 
 
-@router.get(
+@router.api_route(
     "/health/ready",
+    methods=["GET", "HEAD"],
     response_model=Envelope[Readiness],
     summary="Readiness: database reachable + migrations at head",
 )

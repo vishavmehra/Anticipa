@@ -31,6 +31,11 @@ def test_me_upserts_the_user_profile(api_client, auth_headers, db_session):
     )
 
 
+def test_readiness_answers_head_for_uptime_monitors(api_client):
+    resp = api_client.head("/api/v1/health/ready")
+    assert resp.status_code == 200 and resp.content == b""
+
+
 def test_readiness_is_ok_when_migrated(api_client):
     resp = api_client.get("/api/v1/health/ready")
     assert resp.status_code == 200

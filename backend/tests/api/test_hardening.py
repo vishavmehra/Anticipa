@@ -8,6 +8,11 @@ from anticipa.api.middleware import MAX_BODY_BYTES
 API = "/api/v1"
 
 
+def test_health_answers_head_for_uptime_monitors(api_client_nodb):
+    resp = api_client_nodb.head(f"{API}/health")
+    assert resp.status_code == 200 and resp.content == b""
+
+
 def test_security_headers_and_no_store_by_default(api_client_nodb):
     resp = api_client_nodb.get(f"{API}/health")
     assert resp.status_code == 200

@@ -51,7 +51,7 @@ The judge account and Google sign-in are both the **observer** role: you can bro
 
 **Cinematic film (about 3 minutes):** <!-- FILM_URL -->_Link added with the final submission._
 
-**Full walkthrough (20 to 40 minutes, narrated and subtitled, every dashboard):** <!-- WALKTHROUGH_URL -->_Link added with the final submission._
+**Full walkthrough (20 to 40 minutes, narrated and subtitled, every dashboard):** [Watch the 30:54 walkthrough](https://github.com/vishavmehra/Anticipa/releases/download/walkthrough-v1/anticipa-walkthrough.mp4) (1080p, English subtitles burned in; chapters and the SRT are in [`walkthrough/`](walkthrough/)).
 
 ---
 

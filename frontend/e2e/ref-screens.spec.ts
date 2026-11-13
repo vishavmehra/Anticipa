@@ -38,3 +38,15 @@ for (const mode of ["dark", "clinical"] as const) {
     await page.screenshot({ path: `test-results/screenshots/ref-command-center-${mode}.png` });
   });
 }
+
+// State zoom: Madhya Pradesh opened, then Bhopal selected (tilted glass look kept at every level).
+test("ref command-center-state", async ({ page, context }) => {
+  await boot(page, context, "population_admin", REF_HANDLERS);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Madhya Pradesh" }).click();
+  await page.waitForTimeout(1500);
+  await page.screenshot({ path: "test-results/screenshots/ref-command-center-state.png" });
+  await page.getByRole("button", { name: /^Bhopal/ }).click();
+  await page.waitForTimeout(900);
+  await page.screenshot({ path: "test-results/screenshots/ref-command-center-district.png" });
+});

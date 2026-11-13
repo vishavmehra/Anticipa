@@ -125,8 +125,9 @@ function Schedule({ clinics }: { clinics: Clinic[] }) {
   const [view, setView] = useState<"day" | "week">("day");
   const key = clinicKey || clinics[0]?.clinic_key || "";
   const [now] = useState(() => Date.now()); // read once: a render must not call the clock
-  const from = new Date(now).toISOString().slice(0, 10);
-  const to = new Date(now + 14 * 86400000).toISOString().slice(0, 10);
+  // The slots endpoint parses datetimes and rejects a bare date: send full UTC timestamps ending in Z.
+  const from = `${new Date(now).toISOString().slice(0, 10)}T00:00:00Z`;
+  const to = `${new Date(now + 14 * 86400000).toISOString().slice(0, 10)}T00:00:00Z`;
   const res = useApi(`ops-slots:${key}`, (s) => (key ? apiList<Slot>("/planning/capacity-slots", { clinic_key: key, from, to, page_size: 100 }, s) : Promise.resolve(null)));
   const slots = useMemo(() => res.data?.data ?? [], [res.data]);
   const days = useMemo(() => [...new Set(slots.map((s) => dayOf(s.start_time)))].sort(), [slots]);

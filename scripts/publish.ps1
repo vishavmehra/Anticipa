@@ -75,6 +75,11 @@ try {
         Invoke-Git rm -q --cached -- $file
         Remove-Item -Force -LiteralPath $file
     }
+    # Large video files are published as GitHub Release assets, never as repository files.
+    foreach ($file in @(& git ls-files -- "walkthrough/*.mp4" "walkthrough/*.webm" "walkthrough/*.mov" "walkthrough/*.mkv")) {
+        Invoke-Git rm -q --cached -- $file
+        Remove-Item -Force -LiteralPath $file
+    }
     Invoke-Git add -A
 
     # Safety gates: no documentation, no env files, no key-shaped strings.

@@ -58,6 +58,18 @@ test.describe("command center", () => {
     expect(seen.some((u) => u.includes("analytics/programmes") && u.includes("district=D01"))).toBe(true);
   });
 
+  test("the India map zoom transform changes when a state is opened and returns when it is closed", async ({ page, context }) => {
+    await boot(page, context, "population_admin", MODULE_HANDLERS);
+    await page.goto("/");
+    await expect(page.getByRole("group", { name: /Map of India coloured by/ })).toBeVisible();
+    const scaleOf = () => page.locator(".map-zoom").evaluate((el) => new DOMMatrix(getComputedStyle(el).transform).a);
+    await expect.poll(scaleOf).toBeCloseTo(1, 2);
+    await page.getByRole("button", { name: "Open Madhya Pradesh" }).click();
+    await expect.poll(scaleOf, { timeout: 5000 }).toBeGreaterThan(1.5);
+    await page.getByRole("button", { name: "India", exact: true }).click();
+    await expect.poll(scaleOf, { timeout: 5000 }).toBeCloseTo(1, 2);
+  });
+
   test("system administrators also see recent activity and the job health rule", async ({ page, context }) => {
     await boot(page, context, "system_admin", MODULE_HANDLERS);
     await page.goto("/");
@@ -96,6 +108,24 @@ test.describe("command center", () => {
     await boot(page, context, "observer", MODULE_HANDLERS);
     await page.goto("/");
     await expect(page.getByText("Read only access").first()).toBeVisible();
+  });
+});
+
+test.describe("operations", () => {
+  test("the appointment schedule asks for capacity slots with timezone aware from and to", async ({ page, context }) => {
+    const urls: URL[] = [];
+    await boot(page, context, "population_admin", {
+      ...MODULE_HANDLERS,
+      "GET /planning/capacity-slots": (_r, url) => {
+        urls.push(url);
+        return { body: paged([], 1, 100, 0) };
+      },
+    });
+    await page.goto("/operations");
+    await expect.poll(() => urls.length, { timeout: 15000 }).toBeGreaterThan(0);
+    const q = urls[0].searchParams;
+    expect(q.get("from")).toMatch(/T00:00:00Z$/);
+    expect(q.get("to")).toMatch(/T00:00:00Z$/);
   });
 });
 

@@ -81,12 +81,13 @@ export function IndiaMap({ districts, state, district, onState, onDistrict, valu
 
   // Fit the opened state into the same projection by transform, so the move animates.
   const { transform, k, tx, ty } = useMemo(() => {
-    if (!path || !selFeature) return { transform: "translate(0 0) scale(1)", k: 1, tx: 0, ty: 0 };
+    if (!path || !selFeature) return { transform: "translate(0px, 0px) scale(1)", k: 1, tx: 0, ty: 0 };
     const [[x0, y0], [x1, y1]] = path.bounds(selFeature as Feature);
     const kk = Math.min(8, 0.86 / Math.max((x1 - x0) / W, (y1 - y0) / H));
     const x = W / 2 - (kk * (x0 + x1)) / 2;
     const y = H / 2 - (kk * (y0 + y1)) / 2;
-    return { transform: `translate(${x} ${y}) scale(${kk})`, k: kk, tx: x, ty: y };
+    // CSS syntax (px units, commas): the SVG attribute form is not valid in a style property and was silently ignored.
+    return { transform: `translate(${x.toFixed(2)}px, ${y.toFixed(2)}px) scale(${kk.toFixed(4)})`, k: kk, tx: x, ty: y };
   }, [path, selFeature]);
 
   useEffect(() => {
@@ -195,7 +196,7 @@ export function IndiaMap({ districts, state, district, onState, onDistrict, valu
         />
         <div style={{ perspective: "1200px" }}>
           <div className="map-tilt" style={{ transform: "rotateX(20deg) rotateZ(-4deg)", transformOrigin: "50% 60%" }}>
-            <svg viewBox={`0 0 ${W} ${H}`} role="group" aria-label={`Map of India coloured by ${valueLabel}`} className="mx-auto block h-auto max-h-[34rem] w-full touch-pan-y overflow-visible">
+            <svg viewBox={`-10 -10 ${W + 20} ${H + 40}`} role="group" aria-label={`Map of India coloured by ${valueLabel}`} className="mx-auto block h-auto max-h-[34rem] w-full touch-pan-y overflow-hidden">
               <defs>
                 {SCALE.map((c, i) => (
                   <linearGradient key={c} id={`${uid}-g${i}`} x1="0" y1="0" x2="1" y2="1">

@@ -44,3 +44,9 @@ graphify-out/
 *.7z
 *.zip
 test-results*
+
+# --- Walkthrough video: too large for the repo; it is attached to a GitHub Release (walkthrough/README.md links it) ---
+walkthrough/*.mp4
+walkthrough/*.webm
+walkthrough/*.mov
+walkthrough/*.mkv

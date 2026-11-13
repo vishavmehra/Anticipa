@@ -1,0 +1,206 @@
+{
+  "project": "Anticipa",
+  "note": "draw.io sources are in src/. Exports are SVG (embeds the editable diagram) and PNG at 2x. All data shown is synthetic or simulated.",
+  "diagrams": [
+    {
+      "id": "01",
+      "title": "System context",
+      "description": "Who uses Anticipa and which outside services it depends on: roles, Claude, Nebius, Supabase, Render, Vercel, HAPI FHIR, Synthea.",
+      "files": {
+        "source": "src/01-system-context.drawio",
+        "svg": "01-system-context.svg",
+        "png": "01-system-context.png"
+      }
+    },
+    {
+      "id": "02",
+      "title": "Container and module architecture",
+      "description": "The FastAPI modular monolith, worker, Next.js app and stores, with modules grouped by READ, DECIDE, PLAN, ACT, CLOSE.",
+      "files": {
+        "source": "src/02-container-architecture.drawio",
+        "svg": "02-container-architecture.svg",
+        "png": "02-container-architecture.png"
+      }
+    },
+    {
+      "id": "03",
+      "title": "End to end flow",
+      "description": "Read, decide, plan, act and close the loop, with the cross-cutting audit, synthetic labelling and human review rules.",
+      "files": {
+        "source": "src/03-end-to-end-flow.drawio",
+        "svg": "03-end-to-end-flow.svg",
+        "png": "03-end-to-end-flow.png"
+      }
+    },
+    {
+      "id": "04",
+      "title": "Synthetic data pipeline",
+      "description": "Seeded Synthea batches, lean storage profiles, family linking and document generation with planted, isolated ground truth.",
+      "files": {
+        "source": "src/04-synthetic-data-pipeline.drawio",
+        "svg": "04-synthetic-data-pipeline.svg",
+        "png": "04-synthetic-data-pipeline.png"
+      }
+    },
+    {
+      "id": "05",
+      "title": "Evidence extraction",
+      "description": "Model Router call, deterministic quote verification, acceptance policy, normaliser, review queue, capped escalation and retrieval.",
+      "files": {
+        "source": "src/05-evidence-extraction.drawio",
+        "svg": "05-evidence-extraction.svg",
+        "png": "05-evidence-extraction.png"
+      }
+    },
+    {
+      "id": "06",
+      "title": "Model Router",
+      "description": "Task routing, budget guard, response cache, adapters, validation and usage logging, with no automatic cross-provider fallback.",
+      "files": {
+        "source": "src/06-model-router.drawio",
+        "svg": "06-model-router.svg",
+        "png": "06-model-router.png"
+      }
+    },
+    {
+      "id": "07",
+      "title": "Guideline engine",
+      "description": "Version lifecycle with Guideline Studio dry run, deterministic evaluation, the seven outcomes and the resulting cases.",
+      "files": {
+        "source": "src/07-guideline-engine.drawio",
+        "svg": "07-guideline-engine.svg",
+        "png": "07-guideline-engine.png"
+      }
+    },
+    {
+      "id": "08",
+      "title": "Care gap case lifecycle",
+      "description": "The thirteen case statuses and their transitions, plus the deterministic priority rules.",
+      "files": {
+        "source": "src/08-care-gap-case-lifecycle.drawio",
+        "svg": "08-care-gap-case-lifecycle.svg",
+        "png": "08-care-gap-case-lifecycle.png"
+      }
+    },
+    {
+      "id": "09",
+      "title": "Capacity planning",
+      "description": "OR-Tools CP-SAT planning with priority and equity objectives, consent and capacity constraints, validation and a first come baseline.",
+      "files": {
+        "source": "src/09-capacity-planning.drawio",
+        "svg": "09-capacity-planning.svg",
+        "png": "09-capacity-planning.png"
+      }
+    },
+    {
+      "id": "10",
+      "title": "Engagement and conversation safety",
+      "description": "Simulated outreach and the resident conversation safety flow: classifier, model, reply checks, escalation and the emergency override.",
+      "files": {
+        "source": "src/10-engagement-and-conversation-safety.drawio",
+        "svg": "10-engagement-and-conversation-safety.svg",
+        "png": "10-engagement-and-conversation-safety.png"
+      }
+    },
+    {
+      "id": "11",
+      "title": "Loop closure",
+      "description": "Completion evidence, reference check and second person verification, with the authorised exception path.",
+      "files": {
+        "source": "src/11-loop-closure.drawio",
+        "svg": "11-loop-closure.svg",
+        "png": "11-loop-closure.png"
+      }
+    },
+    {
+      "id": "12",
+      "title": "Consent enforcement",
+      "description": "The append only consent ledger and the six places it is enforced.",
+      "files": {
+        "source": "src/12-consent-enforcement.drawio",
+        "svg": "12-consent-enforcement.svg",
+        "png": "12-consent-enforcement.png"
+      }
+    },
+    {
+      "id": "13",
+      "title": "Ask Anticipa",
+      "description": "Grounded natural language analytics: pre-filter, read only tools, numeric grounding check, server built charts and refusals.",
+      "files": {
+        "source": "src/13-ask-anticipa.drawio",
+        "svg": "13-ask-anticipa.svg",
+        "png": "13-ask-anticipa.png"
+      }
+    },
+    {
+      "id": "14",
+      "title": "Analytics snapshot and caching",
+      "description": "Snapshot refresh triggers, single row reads, ETag and Cache-Control, and the client stale while revalidate cache.",
+      "files": {
+        "source": "src/14-analytics-snapshot-and-caching.drawio",
+        "svg": "14-analytics-snapshot-and-caching.svg",
+        "png": "14-analytics-snapshot-and-caching.png"
+      }
+    },
+    {
+      "id": "15",
+      "title": "Authentication and RBAC",
+      "description": "Supabase JWT flow and the role to permission map for the five roles, including the read only observer.",
+      "files": {
+        "source": "src/15-auth-and-rbac.drawio",
+        "svg": "15-auth-and-rbac.svg",
+        "png": "15-auth-and-rbac.png"
+      }
+    },
+    {
+      "id": "16",
+      "title": "Deployment topology",
+      "description": "Vercel, Render and Supabase for the judging environment, the GitHub Actions keepalive ping, Docker on a laptop for the full dataset, and the code only GitHub snapshot.",
+      "files": {
+        "source": "src/16-deployment-topology.drawio",
+        "svg": "16-deployment-topology.svg",
+        "png": "16-deployment-topology.png"
+      }
+    },
+    {
+      "id": "17",
+      "title": "FHIR mapping and write-back",
+      "description": "How Synthea resources and Anticipa rows become FHIR R4 resources in HAPI through idempotent transaction bundles.",
+      "files": {
+        "source": "src/17-fhir-mapping-and-write-back.drawio",
+        "svg": "17-fhir-mapping-and-write-back.svg",
+        "png": "17-fhir-mapping-and-write-back.png"
+      }
+    },
+    {
+      "id": "18",
+      "title": "Evaluation harness",
+      "description": "Isolated ground truth, dev and test splits, a deliberate final run, metrics, gates and reporting.",
+      "files": {
+        "source": "src/18-evaluation-harness.drawio",
+        "svg": "18-evaluation-harness.svg",
+        "png": "18-evaluation-harness.png"
+      }
+    },
+    {
+      "id": "19",
+      "title": "India geography drill down",
+      "description": "Country, state and district levels with the ten synthetic pilot districts.",
+      "files": {
+        "source": "src/19-india-geography-drilldown.drawio",
+        "svg": "19-india-geography-drilldown.svg",
+        "png": "19-india-geography-drilldown.png"
+      }
+    },
+    {
+      "id": "20",
+      "title": "Security layers",
+      "description": "Seven layers of defence from the edge to identity, authorization, data, AI safety, audit and publishing.",
+      "files": {
+        "source": "src/20-security-layers.drawio",
+        "svg": "20-security-layers.svg",
+        "png": "20-security-layers.png"
+      }
+    }
+  ]
+}

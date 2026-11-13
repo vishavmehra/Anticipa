@@ -194,3 +194,22 @@ def test_module_clis_are_mounted_under_anticipa(capsys):
         cli.main(["planning", "--help"])  # delegated to anticipa.planning.cli, which owns its sub-commands
     assert exit_info.value.code == 0
     assert "generate-capacity" in capsys.readouterr().out
+
+
+@respx.mock
+def test_judge_login_gets_its_own_password_so_it_cannot_open_a_privileged_account():
+    respx.get(USERS_URL).mock(return_value=httpx.Response(200, json={"users": []}))
+    uid = {"id": "00000000-0000-4000-8000-000000000001"}
+    create = respx.post(USERS_URL).mock(return_value=httpx.Response(200, json=uid))
+
+    seed_users(settings(), PASSWORD, judge_password="a-different-judge-password")  # noqa: S106
+
+    bodies = [json.loads(c.request.content) for c in create.calls]
+    by_email = {b["email"]: b["password"] for b in bodies}
+    assert by_email["anticipa.judge@example.com"] == "a-different-judge-password"
+    assert {pw for email, pw in by_email.items() if email != "anticipa.judge@example.com"} == {PASSWORD}
+
+
+def test_a_short_judge_password_is_refused():
+    with pytest.raises(SeedError, match="ANTICIPA_JUDGE_PASSWORD"):
+        seed_users(settings(), PASSWORD, judge_password="short")  # noqa: S106

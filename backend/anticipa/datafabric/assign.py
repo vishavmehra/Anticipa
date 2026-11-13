@@ -4,6 +4,7 @@ Synthea's demographics are US-based; districts and preferred languages are synth
 hash of the resident UUID, so they are reproducible and independent of generation order. The weights below are an
 assumption pending Q-008 and are recorded in every dataset manifest.
 """
+# ruff: noqa: E501
 
 from __future__ import annotations
 

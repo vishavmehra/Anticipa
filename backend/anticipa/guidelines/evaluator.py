@@ -1,26 +1,35 @@
-"""Pure deterministic rule evaluator (Docs/08 §7-§10). No I/O, no clock, no randomness, no LLM.
+"""Pure deterministic evaluator for 08-format guideline versions (Docs/08 §7-§10, rules schema v2). No I/O, no
+clock, no
+randomness, no LLM.
 
-    evaluate_rule(rule, inputs, evaluation_date) -> RuleResult
+    evaluate_guideline(definition, inputs, evaluation_date, sources) -> GuidelineResult
 
-is a pure function of the validated rule, the normalised inputs and the explicit evaluation date, so the same inputs
-always give byte-identical results (08 §8.2). Criteria use three-valued logic (passed / failed / unknown); missing
-information is never silently turned into a negative clinical finding (08 §3.3).
+is a pure function of the validated guideline definition, the normalised inputs and the explicit evaluation
+date, so
+identical inputs always give identical results (08 §8.2). Expressions use Kleene three-valued logic (true /
+false /
+unknown). Each rule maps its expression result to a criterion outcome (`criterion_semantics`) and to a
+contribution to
+the overall outcome (`outcome_by_expression_result`); the decision policy ranks contributions and the
+best-ranked one wins
+(none -> eligible). Missing information is never silently turned into a negative clinical finding: only where
+a rule's own semantics say so (D-01, "no documented X") let absence change an outcome.
 
-Outcomes (04 §11.2) and their 08 class:
-    eligible                    -> eligible
-    not_eligible, already_completed, temporarily_excluded            -> ineligible
-    insufficient_evidence, requires_clinical_review                   -> indeterminate
-    evaluation_error                                                  -> error
-
-Evaluation order: engine prerequisite (resident alive) -> inclusion -> exclusions (skipped as not_applicable when the
-inclusion failed). A definitively applying exclusion wins over an unknown inclusion; unknown anything else is
-indeterminate. Only evidence facts with validation_status `accepted` and subject_type matching the leaf are ever used,
-so facts about relatives are never attributed to the resident (and the reverse).
+Evidence handling (07, 08 §10): only facts with validation_status `accepted` are definite; uncertain /
+conditional / not
+yet accepted facts and relatives of undecidable relevance are UNRESOLVED candidates; aggregates over subjects
+are
+intervals [definite, definite + unresolved] so the engine never claims more certainty than the evidence gives;
+positive
+and negative facts about one subject, or two different ages at onset for one relative, are reported as
+conflicts and
+never resolved silently.
 """
 
 from __future__ import annotations
 
 import calendar
+import math
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -28,39 +37,42 @@ from datetime import date, timedelta
 from typing import Any
 
 from anticipa.guidelines.rules import (
-    CLINICAL_FIELDS,
+    AGE_FIELD,
     INPUT_SCHEMA_VERSION,
-    RELATIONSHIP_DEGREE,
+    OUTCOME_CLASS,
+    SEX_FIELD,
     AndOrGroup,
+    Duration,
+    FieldRef,
+    GuidelineDefinition,
     Leaf,
     NotGroup,
-    RuleDefinition,
+    Rule,
+    Selector,
     canonical_hash,
+    leaves_of,
+    parse_field,
 )
 
-ENGINE_VERSION = "guideline-engine/1.0.0"
+ENGINE_VERSION = "guideline-engine/2.1.0"
+REVIEW_PENDING = "pending_clinical_review"
+REVIEW_DONE = "clinically_reviewed"
+CLINICAL_REVIEW_STATUSES = (REVIEW_PENDING, REVIEW_DONE)
 
-OUTCOMES = (
-    "eligible", "not_eligible", "already_completed", "insufficient_evidence", "requires_clinical_review",
-    "temporarily_excluded", "evaluation_error",
-)  # fmt: skip
-OUTCOME_CLASSES = ("eligible", "ineligible", "indeterminate", "error")
-OUTCOME_CLASS: dict[str, str] = {
-    "eligible": "eligible",
-    "not_eligible": "ineligible",
-    "already_completed": "ineligible",
-    "temporarily_excluded": "ineligible",
-    "insufficient_evidence": "indeterminate",
-    "requires_clinical_review": "indeterminate",
-    "evaluation_error": "error",
+SYSTEM_ALIASES = {"http://snomed.info/sct": "SNOMED-CT", "http://loinc.org": "LOINC"}
+# structured clinical_records.category -> evidence category used by selectors
+RECORD_CATEGORY = {
+    "condition": "condition",
+    "procedure": "procedure",
+    "observation": "observation",
+    "immunization": "immunization",
+    "diagnostic_report": "diagnostic_finding",
+    "medication": "medication",
 }
-CRITERION_OUTCOMES = ("passed", "failed", "unknown", "not_applicable", "error")
-# precedence among exclusions that definitively apply (first wins); requires_clinical_review is indeterminate-class
-_EXCLUSION_PRECEDENCE = ("not_eligible", "already_completed", "temporarily_excluded", "requires_clinical_review")
-# FHIR statuses that never evidence that something happened
-DEFAULT_IGNORED_STATUSES = frozenset({"entered-in-error", "not-done", "cancelled"})
-DEFAULT_ASSERTIONS = ("positive",)
-DEFAULT_TEMPORAL = ("current", "historical")
+IGNORED_RECORD_STATUSES = frozenset({"entered-in-error", "not-done", "cancelled"})
+PLANNED_RECORD_STATUSES = frozenset({"preparation", "planned", "scheduled", "proposed"})
+DEFAULT_COVERAGE_YEARS = 5
+INF = math.inf
 
 
 # ---------------------------------------------------------------- inputs (normalised, immutable)
@@ -69,472 +81,906 @@ class ResidentFacts:
     id: uuid.UUID
     birth_date: date | None
     deceased_date: date | None
-    sex: str | None
+    sex: (
+        str | None
+    )  # sex assigned at birth (from residents.administrative_sex for Synthea data, assumption A-02)
 
 
 @dataclass(frozen=True, slots=True)
-class RecordFact:
-    """A normalised `clinical_records` row (structured evidence)."""
+class Fact:
+    """One piece of evidence: a structured clinical record (source 'record') or an evidence fact ('fact')."""
 
-    id: uuid.UUID
+    id: str
+    source: str  # record | fact
     category: str
+    fact_type: str | None
     code_system: str | None
     code: str | None
-    normalized_code_system: str | None
-    normalized_code: str | None
-    start: date | None  # UTC calendar date of effective_start
-    status: str | None
-    source_reference: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class EvidenceItem:
-    """An `evidence_facts` row. `validation_status` is checked here too: only `accepted` is ever used."""
-
-    id: uuid.UUID
-    category: str
-    fact_type: str
     subject_type: str
     relationship: str | None
+    subject_key: str  # identifies the person the fact is about (distinct relatives are counted by this)
     assertion: str
     temporal: str
-    age_at_onset: int | None
-    validation_status: str = "accepted"
+    validation: str
+    date_start: date | None = None  # partial dates carry their full range (08 §9.1)
+    date_end: date | None = None
+    onset: int | None = None
+    doc_id: str | None = None
+    quote: str | None = None
+    reference: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ResidentInputs:
     resident: ResidentFacts
-    records: Sequence[RecordFact] = ()
-    facts: Sequence[EvidenceItem] = ()
+    facts: Sequence[Fact] = ()
+    latest_record_date: date | None = None  # most recent structured clinical record (coverage prerequisite)
+
+
+def record_to_fact(
+    rid: uuid.UUID | str,
+    category: str,
+    system: str | None,
+    code: str | None,
+    start: date | None,
+    end: date | None,
+    status: str | None,
+    on: date,
+    reference: str | None = None,
+) -> Fact | None:
+    """Normalise a clinical_records row; None for records that evidence nothing (entered in error, not
+    done...)."""  # noqa: E501
+    if status in IGNORED_RECORD_STATUSES:
+        return None
+    if start is not None and start > on or status in PLANNED_RECORD_STATUSES:
+        temporal = "planned"
+    elif category == "condition" and end is not None and end <= on:
+        temporal = "historical"
+    else:
+        temporal = "current" if category == "condition" else "historical"
+    return Fact(
+        str(rid),
+        "record",
+        RECORD_CATEGORY.get(category, category),
+        None,
+        SYSTEM_ALIASES.get(system or "", system),
+        code,
+        "resident",
+        None,
+        "self",
+        "positive",
+        temporal,
+        "accepted",
+        start,
+        start,
+        None,
+        None,
+        None,
+        reference,
+    )
 
 
 # ---------------------------------------------------------------- results
 @dataclass(slots=True)
-class Res:
-    outcome: str  # passed | failed | unknown
-    text: str
-    refs: list[dict[str, str]] = field(default_factory=list)
-    review: bool = False  # only meaningful when outcome == unknown
+class Tri:
+    value: bool | None
+    text: str = ""
+    refs: list[dict[str, Any]] = field(default_factory=list)
+    review: bool = False  # an unknown that a person should look at
+    conflicts: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
 class CriterionResult:
-    criterion_id: str
-    scope: str  # engine | inclusion | exclusion:<id>
-    label: str | None
-    outcome: str
-    explanation: str
-    evidence_refs: list[dict[str, str]] = field(default_factory=list)
-    review_required: bool = False
-    field: str | None = None
+    rule_id: str
+    rule_type: str
+    priority: int
+    result: bool | None
+    outcome: str  # criterion outcome (08 §7.1)
+    contribution: str | None  # contribution to the overall outcome (or None)
+    review_class: str | None
+    detail: str
+    reason_code: str
+    refs: list[dict[str, Any]]
+    review: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
-            "criterion_id": self.criterion_id, "scope": self.scope, "label": self.label, "field": self.field,
-            "outcome": self.outcome, "explanation": self.explanation, "evidence_refs": self.evidence_refs,
-        }  # fmt: skip
-        if self.review_required:
+            "criterion_id": self.rule_id,
+            "rule_type": self.rule_type,
+            "priority": self.priority,
+            "result": "unknown" if self.result is None else self.result,
+            "outcome": self.outcome,
+            "detail": self.detail,
+        }
+        if self.contribution:
+            d["contributes"] = self.contribution
+        if self.outcome != "passed":
+            d["reason_code"] = self.reason_code
+        if self.review:
             d["review_required"] = True
         return d
 
 
 @dataclass(slots=True)
-class RuleResult:
-    outcome: str
+class GuidelineResult:
+    outcome: str  # one of the seven 04 §11.2 outcomes
+    outcome_class: str  # eligible | ineligible | indeterminate | error
+    reason_code: str | None
+    decisive_rule_id: str | None
     basis: str
+    explanation_text: str | None
     criteria: list[CriterionResult]
-    evidence_references: list[dict[str, str]]
+    evidence_references: list[dict[str, Any]]
     missing_information: list[dict[str, Any]]
+    conflicting_information: list[dict[str, Any]]
     exclusion_reasons: list[dict[str, Any]]
+    source_references: list[dict[str, Any]]
 
-    @property
-    def outcome_class(self) -> str:
-        return OUTCOME_CLASS[self.outcome]
-
-    def explanation(self, rule_key: str | None, evaluation_date: date) -> dict[str, Any]:
+    def explanation(self, guideline: dict[str, Any], evaluation_date: date) -> dict[str, Any]:
         return {
             "engine_version": ENGINE_VERSION,
-            "rule_key": rule_key,
             "evaluation_date": evaluation_date.isoformat(),
-            "decision": {"outcome": self.outcome, "outcome_class": self.outcome_class, "basis": self.basis},
+            "guideline": guideline,
+            "decision": {
+                "outcome": self.outcome,
+                "outcome_class": self.outcome_class,
+                "reason_code": self.reason_code,
+                "decisive_rule_id": self.decisive_rule_id,
+                "basis": self.basis,
+                "explanation": self.explanation_text,
+            },
             "criteria": [c.as_dict() for c in self.criteria],
         }
 
 
-# ---------------------------------------------------------------- date helpers (explicit evaluation date only)
+# ---------------------------------------------------------------- date helpers (explicit evaluation date
+# only)
 def age_years(birth: date, on: date) -> int:
     return on.year - birth.year - ((on.month, on.day) < (birth.month, birth.day))
 
 
-def shift_back(on: date, years: int, months: int, days: int) -> date:
+def shift_back(on: date, years: int = 0, months: int = 0, days: int = 0) -> date:
     """`on` minus years/months/days; the day is clamped to the target month's length (calendar arithmetic)."""
     y, m0 = divmod(on.year * 12 + (on.month - 1) - years * 12 - months, 12)
-    month_start = date(y, m0 + 1, min(on.day, calendar.monthrange(y, m0 + 1)[1]))
-    return month_start - timedelta(days=days)
+    return date(y, m0 + 1, min(on.day, calendar.monthrange(y, m0 + 1)[1])) - timedelta(days=days)
 
 
-# ---------------------------------------------------------------- leaf evaluation
-def _compare(op: str, left: int, right: Any) -> bool:
-    if op == "EQUALS":
-        return left == right
-    if op == "NOT_EQUALS":
-        return left != right
-    if op == "GREATER_THAN":
-        return left > right
-    if op == "GREATER_THAN_OR_EQUAL":
-        return left >= right
-    if op == "LESS_THAN":
-        return left < right
-    if op == "LESS_THAN_OR_EQUAL":
-        return left <= right
-    if op == "IN":
-        return left in right
-    if op == "NOT_IN":
-        return left not in right
-    raise ValueError(f"unsupported operator {op}")  # unreachable for validated rules
+def parse_partial_date(text: Any) -> tuple[date, date] | None:
+    """'2018', '2018-03' or '2018-03-05' -> (first day, last day) of the stated precision; None when
+    unparseable."""  # noqa: E501
+    if not isinstance(text, str):
+        return None
+    parts = text.strip()[:10].split("-")
+    try:
+        nums = [int(p) for p in parts]
+        if len(nums) == 1:
+            return date(nums[0], 1, 1), date(nums[0], 12, 31)
+        if len(nums) == 2:
+            return date(nums[0], nums[1], 1), date(nums[0], nums[1], calendar.monthrange(nums[0], nums[1])[1])
+        d = date(nums[0], nums[1], nums[2])
+        return d, d
+    except (ValueError, IndexError):
+        return None
 
 
-def _policy_missing(policy: str, what: str, presence_op: str | None = None) -> Res:
-    """Apply a missing-data policy. For presence leaves the policy is about the existence predicate."""
-    if policy == "not_satisfied":
-        if presence_op is None:
-            return Res("failed", f"{what}; treated as not satisfied by the rule's missing-data policy.")
-        passed = presence_op == "NOT_EXISTS"
-        return Res(
-            "passed" if passed else "failed",
-            f"{what}; existence is treated as false by the rule's missing-data policy.",
-        )
-    return Res("unknown", f"{what}.", review=policy == "review_required")
-
-
-def _eval_age(leaf: Leaf, policy: str, inputs: ResidentInputs, on: date) -> Res:
-    birth = inputs.resident.birth_date
-    if birth is None:
-        return _policy_missing(policy, "The date of birth is not available")
-    if birth > on:
-        raise ValueError("date of birth is after the evaluation date")
-    age = age_years(birth, on)
-    ref = [{"type": "resident_attribute", "attribute": "birth_date"}]
-    ok = _compare(leaf.operator, age, leaf.value)
-    return Res(
-        "passed" if ok else "failed",
-        f"Age is {age} on {on.isoformat()}; condition {leaf.operator} {leaf.value} is {'met' if ok else 'not met'}.",
-        ref,
-    )
-
-
-def _eval_sex(leaf: Leaf, policy: str, inputs: ResidentInputs) -> Res:
-    sex = inputs.resident.sex
-    if sex is None or sex == "unknown":
-        return _policy_missing(policy, "The administrative sex is not recorded")
-    value = leaf.value
-    ok = (sex in value) if leaf.operator in ("IN", "NOT_IN") and isinstance(value, list) else (sex == value)
-    if leaf.operator in ("NOT_EQUALS", "NOT_IN"):
-        ok = not ok
-    ref = [{"type": "resident_attribute", "attribute": "administrative_sex"}]
-    return Res("passed" if ok else "failed", f"Administrative sex is {sex}; condition {leaf.operator} is {'met' if ok else 'not met'}.", ref)
-
-
-def _record_matches(rec: RecordFact, category: str, codeset: frozenset[tuple[str, str]], ignored: frozenset[str],
-                    status_in: frozenset[str] | None) -> bool:  # fmt: skip
-    if rec.category != category:
-        return False
+# ---------------------------------------------------------------- selectors
+def _classify(sel: Selector, f: Fact) -> str | None:
+    """None (irrelevant) | 'definite' | 'negative' | 'unresolved' — how fact `f` relates to selector `sel`."""
+    if f.subject_type not in sel.subject_type_in:
+        return None
+    if "any" not in sel.category_in and f.category not in sel.category_in:
+        return None
+    unresolved_relative = False
+    if f.subject_type == "family_member":
+        if sel.unresolved_relationship_in and f.relationship in sel.unresolved_relationship_in:
+            unresolved_relative = True  # a relative whose relevance (e.g. sex) cannot be decided
+        elif sel.relationship_in and f.relationship not in sel.relationship_in:
+            return None
     if not (
-        (rec.code_system and rec.code and (rec.code_system, rec.code) in codeset)
-        or (rec.normalized_code_system and rec.normalized_code and (rec.normalized_code_system, rec.normalized_code) in codeset)
+        "any" in sel.fact_type_in
+        or (f.fact_type is not None and f.fact_type in sel.fact_type_in)
+        or (f.code is not None and (f.code_system or "", f.code) in sel.codeset)
     ):
-        return False
-    if status_in is not None:
-        return rec.status in status_in
-    return rec.status not in ignored
+        return None
+    if f.validation in ("rejected", "failed"):
+        return None
+    if (
+        f.validation != "accepted"
+    ):  # requires_review, pending, ...: a candidate that is not yet usable evidence
+        return "unresolved"
+    if f.assertion in ("uncertain", "conditional"):
+        return "unresolved"
+    if f.assertion == "negative":
+        return "negative"
+    if unresolved_relative:
+        return "unresolved"
+    if f.temporal in sel.temporal_status_in:
+        return "definite"
+    return "unresolved" if f.temporal == "unknown" else None
 
 
-def _eval_clinical(leaf: Leaf, policy: str, inputs: ResidentInputs, on: date) -> Res:
-    category = CLINICAL_FIELDS[leaf.field]
-    codeset = leaf.codeset
-    status_in = leaf.status_set
-    window_start = shift_back(on, leaf.lookback.years, leaf.lookback.months, leaf.lookback.days) if leaf.lookback else None
-    found: list[RecordFact] = []
-    undated = 0
-    for rec in inputs.records:
-        if not _record_matches(rec, category, codeset, DEFAULT_IGNORED_STATUSES, status_in):
-            continue
-        if rec.start is None:
-            undated += 1
-            if window_start is None:
-                found.append(rec)
-            continue
-        if rec.start > on or (window_start is not None and rec.start < window_start):
-            continue  # future-dated (not yet happened) or outside the lookback window
-        found.append(rec)
-    window = f" within the last {_lookback_text(leaf)}" if leaf.lookback else ""
-    if found:
-        refs = sorted(
-            ({"type": "clinical_record", "id": str(r.id), "source_reference": r.source_reference or ""} for r in found),
-            key=lambda d: d["id"],
-        )
-        exists = leaf.operator == "EXISTS"
-        return Res("passed" if exists else "failed", f"{len(found)} matching {category} record(s) found{window}.", refs)
-    if undated and window_start is not None:
-        return Res("unknown", f"A matching {category} record has no date, so the lookback cannot be applied.")
-    return _policy_missing(policy, f"No matching {category} record found{window}", leaf.operator)
+def _ref(f: Fact) -> dict[str, Any]:
+    d: dict[str, Any] = {"type": "clinical_record" if f.source == "record" else "evidence_fact", "id": f.id}
+    if f.reference:
+        d["source_reference"] = f.reference
+    if f.doc_id:
+        d["document_id"] = f.doc_id
+    if f.quote:
+        d["quote"] = f.quote[:300]
+    return d
 
 
-def _lookback_text(leaf: Leaf) -> str:
-    lb = leaf.lookback
-    parts = [f"{n} {u}" for n, u in ((lb.years, "year(s)"), (lb.months, "month(s)"), (lb.days, "day(s)")) if n]
-    return " ".join(parts)
+def _source(f: Fact) -> dict[str, Any]:
+    d = {
+        "type": "clinical_record" if f.source == "record" else "evidence_fact",
+        "id": f.id,
+        "assertion": f.assertion,
+    }
+    if f.onset is not None:
+        d["age_at_onset"] = f.onset
+    if f.doc_id:
+        d["document_id"] = f.doc_id
+    if f.quote:
+        d["quote"] = f.quote[:300]
+    return d
 
 
-def _eval_evidence(leaf: Leaf, policy: str, inputs: ResidentInputs) -> Res:
-    wanted_assertions = frozenset(leaf.assertion_status or DEFAULT_ASSERTIONS)
-    wanted_temporal = frozenset(leaf.temporal_status or DEFAULT_TEMPORAL)
-    fact_types = frozenset(leaf.fact_types) if leaf.fact_types else None
-    relationships = frozenset(leaf.relationships) if leaf.relationships else None
-    base: list[EvidenceItem] = []  # accepted facts about the right subject/category/type/relationship
+@dataclass(slots=True)
+class SelResult:
+    definite: list[Fact] = field(default_factory=list)
+    unresolved: list[Fact] = field(default_factory=list)
+    negative: list[Fact] = field(default_factory=list)
+    conflicts: list[dict[str, Any]] = field(
+        default_factory=list
+    )  # positive vs negative, or differing onset ages
+    covered: bool | None = None  # coverage selectors only
+    definite_subjects: dict[str, list[Fact]] = field(default_factory=dict)
+    unresolved_only_subjects: set[str] = field(default_factory=set)
+
+    def exists(self) -> bool | None:
+        if self.covered is not None:
+            return self.covered
+        if any(c["type"] == "conflicting_assertions" for c in self.conflicts):
+            return None
+        if self.definite:
+            return True
+        return None if self.unresolved else False
+
+
+def _select(sel: Selector, inputs: ResidentInputs, on: date) -> SelResult:
+    res = SelResult()
+    if sel.is_coverage:
+        lo = shift_back(on, sel.lookback_years or DEFAULT_COVERAGE_YEARS)
+        last = inputs.latest_record_date
+        res.covered = last is not None and lo < last <= on
+        return res
     for f in inputs.facts:
-        if f.validation_status != "accepted" or f.category != leaf.category or f.subject_type != leaf.subject:
-            continue
-        if fact_types is not None and f.fact_type not in fact_types:
-            continue
-        if leaf.subject == "family_member":
-            if f.relationship is None:
-                continue
-            if relationships is not None and f.relationship not in relationships:
-                continue
-            if leaf.max_relationship_degree is not None:
-                degree = RELATIONSHIP_DEGREE.get(f.relationship)
-                if degree is None or degree > leaf.max_relationship_degree:
-                    continue
-        base.append(f)
+        kind = _classify(sel, f)
+        if kind == "definite":
+            res.definite.append(f)
+        elif kind == "negative":
+            res.negative.append(f)
+        elif kind == "unresolved":
+            res.unresolved.append(f)
+    for f in res.definite:
+        res.definite_subjects.setdefault(f.subject_key, []).append(f)
+    res.unresolved_only_subjects = {f.subject_key for f in res.unresolved} - set(res.definite_subjects)
+    for neg in res.negative:
+        pos = res.definite_subjects.get(neg.subject_key)
+        if pos:
+            res.conflicts.append(
+                {
+                    "type": "conflicting_assertions",
+                    "subject": neg.subject_key,
+                    "sources": [_source(f) for f in [*pos, neg]],
+                }
+            )
+    for key, facts in sorted(res.definite_subjects.items()):
+        onsets = {f.onset for f in facts if f.onset is not None}
+        if len(onsets) > 1:
+            res.conflicts.append(
+                {
+                    "type": "conflicting_age_at_onset",
+                    "subject": key,
+                    "values": sorted(onsets),
+                    "sources": [_source(f) for f in facts if f.onset is not None],
+                }
+            )
+    return res
 
-    asserted = {f.assertion for f in base}
-    if "positive" in asserted and "negative" in asserted:  # 08 §10.3: never pick a side
-        refs = _fact_refs(f for f in base if f.assertion in ("positive", "negative"))
-        return Res("unknown", "Accepted evidence contradicts itself (positive and negative statements); review required.", refs, review=True)
 
-    matching = [f for f in base if f.assertion in wanted_assertions and f.temporal in wanted_temporal]
-    satisfied: list[EvidenceItem] = []
-    onset_unknown: list[EvidenceItem] = []
-    for f in matching:
-        if leaf.age_at_onset is None:
-            satisfied.append(f)
-        elif f.age_at_onset is None:
-            onset_unknown.append(f)
-        elif _compare(leaf.age_at_onset.operator, f.age_at_onset, leaf.age_at_onset.value):
-            satisfied.append(f)
-    if satisfied:
-        exists = leaf.operator == "EXISTS"
-        return Res("passed" if exists else "failed", f"{len(satisfied)} accepted evidence fact(s) match.", _fact_refs(satisfied))
-    if onset_unknown:
-        return Res(
-            "unknown",
-            "A matching evidence fact exists but its age at onset is not documented.",
-            _fact_refs(onset_unknown),
+# ---------------------------------------------------------------- interval arithmetic for aggregates
+Interval = tuple[float, float]
+
+
+def _cmp(op: str, a: Interval, b: Interval) -> bool | None:
+    """Compare two closed intervals; True/False only when every pair of points agrees, else None (unknown)."""
+    alo, ahi = a
+    blo, bhi = b
+    if op == "GREATER_THAN":
+        return True if alo > bhi else False if ahi <= blo else None
+    if op == "GREATER_THAN_OR_EQUAL":
+        return True if alo >= bhi else False if ahi < blo else None
+    if op == "LESS_THAN":
+        return True if ahi < blo else False if alo >= bhi else None
+    if op == "LESS_THAN_OR_EQUAL":
+        return True if ahi <= blo else False if alo > bhi else None
+    if op in ("EQUALS", "NOT_EQUALS"):
+        eq = True if (alo == ahi == blo == bhi) else False if (ahi < blo or alo > bhi) else None
+        return eq if op == "EQUALS" or eq is None else not eq
+    if op in ("IN", "NOT_IN"):
+        if alo != ahi:
+            return None
+        inside = alo in b if isinstance(b, (list, tuple, set, frozenset)) else None
+        return inside if op == "IN" else (None if inside is None else not inside)
+    raise ValueError(f"unsupported operator {op}")
+
+
+def _fmt(iv: Interval) -> str:
+    lo, hi = iv
+    f = lambda x: "no limit" if x in (-INF, INF) else str(int(x))  # noqa: E731
+    return f(lo) if lo == hi else f"between {f(lo)} and {f(hi)}"
+
+
+_OP_WORDS = {
+    "EQUALS": "equals",
+    "NOT_EQUALS": "does not equal",
+    "GREATER_THAN": "is greater than",
+    "GREATER_THAN_OR_EQUAL": "is at least",
+    "LESS_THAN": "is less than",
+    "LESS_THAN_OR_EQUAL": "is at most",
+    "IN": "is one of",
+    "NOT_IN": "is not one of",
+}
+
+
+def _op(op: str) -> str:
+    return _OP_WORDS.get(op, op.lower().replace("_", " "))
+
+
+def _shown(value: object) -> str:
+    return ", ".join(str(v) for v in value) if isinstance(value, list) else str(value)
+
+
+# ---------------------------------------------------------------- expression evaluation
+class _Eval:
+    """Per-resident evaluation context; selector results are computed once and shared by every rule."""
+
+    def __init__(self, definition: GuidelineDefinition, inputs: ResidentInputs, on: date) -> None:
+        self.d, self.inputs, self.on = definition, inputs, on
+        self._sel: dict[str, SelResult] = {}
+
+    def sel(self, name: str) -> SelResult:
+        if name not in self._sel:
+            self._sel[name] = _select(self.d.selectors[name], self.inputs, self.on)
+        return self._sel[name]
+
+    # -- values
+    # ---------------------------------------------------------------------------------------------------
+    def age(self) -> int | None:
+        birth = self.inputs.resident.birth_date
+        if birth is None:
+            return None
+        if birth > self.on:
+            raise ValueError("date of birth is after the evaluation date")
+        return age_years(birth, self.on)
+
+    def aggregate(self, name: str, agg: str, other: str | None) -> Interval | None:
+        """The aggregate over a selector's subjects as an interval; None = unknown."""
+        s = self.sel(name)
+        definite, unresolved = s.definite_subjects, s.unresolved_only_subjects
+        if agg == "distinct_subjects":
+            return float(len(definite)), float(len(definite) + len(unresolved))
+        if agg == "shared_subjects":
+            o = self.sel(other or "")
+            lo = len(set(definite) & set(o.definite_subjects))
+            hi = len((set(definite) | unresolved) & (set(o.definite_subjects) | o.unresolved_only_subjects))
+            return float(lo), float(hi)
+        if agg in ("min_age_at_onset", "early_start_age"):
+            if agg == "early_start_age" and unresolved:
+                return None  # a relative who may or may not count: the start age cannot be determined
+            known: list[int] = []
+            uncertain = bool(unresolved)
+            for facts in definite.values():
+                onsets = {f.onset for f in facts if f.onset is not None}
+                if len(onsets) == 1:
+                    known.append(next(iter(onsets)))
+                else:
+                    uncertain = True  # missing age, or two different ages across documents
+            if not definite and not unresolved:
+                lo = hi = INF  # no subjects at all: the minimum is +infinity
+            else:
+                hi = float(min(known)) if known else INF
+                lo = -INF if uncertain else hi
+            if agg == "min_age_at_onset":
+                return lo, hi
+            return min(40.0, lo - 10), min(40.0, hi - 10)  # draft convention: min(40, youngest onset - 10)
+        raise ValueError(f"unsupported aggregate {agg}")
+
+    def interval_of(self, v: Any) -> Interval | None:
+        if isinstance(v, FieldRef):
+            pf = parse_field(v.field)
+            assert pf is not None  # validated at parse time
+            return self.aggregate(*pf)
+        if isinstance(v, int):
+            return float(v), float(v)
+        return None
+
+    # -- nodes
+    # ------------------------------------------------------------------------------------------------------
+    def node(self, node: Any) -> Tri:
+        if isinstance(node, Leaf):
+            return self.leaf(node)
+        if isinstance(node, NotGroup):
+            inner = self.node(node.child)
+            return Tri(
+                None if inner.value is None else not inner.value,
+                f"NOT({inner.text})",
+                inner.refs,
+                inner.review,
+                inner.conflicts,
+            )
+        results = [self.node(c) for c in node.conditions]
+        is_and = isinstance(node, AndOrGroup) and node.operator == "AND"
+        decisive = [r for r in results if r.value is (False if is_and else True)]
+        unknown = [r for r in results if r.value is None]
+        if decisive:
+            return Tri(
+                not is_and,
+                ("AND" if is_and else "OR") + ": " + decisive[0].text,
+                _merge(decisive),
+                False,
+                _conflicts(decisive),
+            )
+        if unknown:
+            return Tri(
+                None,
+                ("AND" if is_and else "OR") + ": " + unknown[0].text,
+                _merge(unknown),
+                any(r.review for r in unknown),
+                _conflicts(unknown),
+            )
+        return Tri(
+            is_and,
+            "AND: all conditions hold" if is_and else "OR: no alternative holds",
+            _merge(results),
+            False,
+            _conflicts(results),
         )
-    unsure = [f for f in base if f.assertion in ("uncertain", "conditional")]
-    if unsure:  # uncertain evidence never becomes certain, and never counts as absence either
-        return Res("unknown", "Only uncertain or conditional evidence exists; clarification required.", _fact_refs(unsure), review=True)
-    return _policy_missing(policy, "No accepted evidence fact matches", leaf.operator)
+
+    def leaf(self, lf: Leaf) -> Tri:
+        op, name = lf.operator, lf.field
+        if name == AGE_FIELD:
+            age = self.age()
+            if age is None:
+                return Tri(None, "date of birth not available")
+            rhs = self.interval_of(lf.value) if not isinstance(lf.value, list) else None
+            if isinstance(lf.value, list):
+                ok = _cmp(op, (float(age), float(age)), lf.value)  # type: ignore[arg-type]
+            elif rhs is None:
+                return Tri(None, "comparison value is unknown")
+            else:
+                ok = _cmp(op, (float(age), float(age)), rhs)
+            shown = _fmt(rhs) if isinstance(lf.value, FieldRef) else _shown(lf.value)
+            return Tri(
+                ok,
+                f"Age {age} {_op(op)} {shown}: {_tri(ok)}",
+                [{"type": "resident_attribute", "attribute": "birth_date"}],
+                False,
+                [],
+            )
+        if name == SEX_FIELD:
+            sex = self.inputs.resident.sex
+            if sex is None or sex == "unknown":
+                return Tri(None, "sex assigned at birth not recorded")
+            inside = sex in lf.value if isinstance(lf.value, list) else sex == lf.value
+            ok = inside if op in ("EQUALS", "IN") else not inside
+            return Tri(
+                ok,
+                f"Sex recorded as {sex} {_op(op)} {_shown(lf.value)}: {_tri(ok)}",
+                [{"type": "resident_attribute", "attribute": "administrative_sex"}],
+            )
+        if name == "evidence.selector":
+            sname = str(lf.value)
+            s = self.sel(sname)
+            ex = s.exists()
+            if s.covered is not None:
+                text = f"{'a' if ex else 'no'} clinical record within the coverage window"
+                refs: list[dict[str, Any]] = [
+                    {"type": "resident_attribute", "attribute": "latest_clinical_record"}
+                ]
+            else:
+                refs = [_ref(f) for f in [*s.definite, *s.unresolved]]
+                if ex is True:
+                    text = f"{len(s.definite)} accepted matching fact(s) for {sname}"
+                elif ex is None:
+                    text = f"{sname}: " + (
+                        "conflicting statements"
+                        if s.conflicts
+                        else "only unresolved evidence (uncertain, conditional, not yet accepted or undecidable relative)"  # noqa: E501
+                    )
+                else:
+                    text = f"no documented {sname}"
+            if op == "NOT_EXISTS" and ex is not None:
+                ex = not ex
+            return Tri(ex, text, refs, ex is None, list(s.conflicts))
+        sname, agg, other = lf.parsed_field  # type: ignore[misc]
+        if agg == "latest_event_date":
+            return self._date_within(sname, lf)
+        left = self.aggregate(sname, agg, other)
+        rhs = None if isinstance(lf.value, list) else self.interval_of(lf.value)
+        s = self.sel(sname)
+        conflicts = list(s.conflicts)
+        if left is None or (rhs is None and not isinstance(lf.value, list)):
+            return Tri(
+                None, f"{_label(sname, agg)} is unknown", [_ref(f) for f in s.unresolved], True, conflicts
+            )
+        ok = _cmp(op, left, lf.value if isinstance(lf.value, list) else rhs)  # type: ignore[arg-type]
+        refs = [_ref(f) for f in [*s.definite, *s.unresolved]]
+        if ok is None:
+            return Tri(
+                None,
+                f"{_label(sname, agg)} is {_fmt(left)}; cannot decide whether it {_op(op)} {_shown(lf.value) if isinstance(lf.value, list) else _fmt(rhs)}",  # noqa: E501
+                refs,
+                True,
+                conflicts,
+            )  # type: ignore[arg-type]
+        return Tri(
+            ok,
+            f"{_label(sname, agg)} is {_fmt(left)}, which {_op(op)} {_shown(lf.value) if isinstance(lf.value, list) else _fmt(rhs)}: {_tri(ok)}",  # noqa: E501
+            refs,
+            False,
+            [],
+        )  # type: ignore[arg-type]
+
+    def _date_within(self, name: str, lf: Leaf) -> Tri:
+        s = self.sel(name)
+        dur: Duration = lf.value  # type: ignore[assignment]
+        lo = shift_back(self.on, dur.years, dur.months, dur.days)
+        if not s.definite:
+            return Tri(None, f"no documented {name}")
+        inside, undetermined = [], 0
+        for f in s.definite:
+            if f.date_start is None or f.date_end is None:
+                undetermined += 1
+            elif f.date_start > lo and f.date_end <= self.on:
+                inside.append(f)
+            elif f.date_end <= lo or f.date_start > self.on:
+                continue
+            else:
+                undetermined += 1  # partial date straddles the window edge
+        window = (
+            f"within the last {dur.years}y {dur.months}m {dur.days}d".replace(" 0y", "")
+            .replace(" 0m", "")
+            .replace(" 0d", "")
+        )
+        if inside:
+            return Tri(True, f"{name} {window}", [_ref(f) for f in inside])
+        if undetermined:
+            return Tri(
+                None,
+                f"{name}: a documented event has no usable date for the window",
+                [_ref(f) for f in s.definite],
+                True,
+            )
+        return Tri(False, f"{name} not {window}", [_ref(f) for f in s.definite])
 
 
-def _fact_refs(facts: Any) -> list[dict[str, str]]:
-    return sorted(({"type": "evidence_fact", "id": str(f.id)} for f in facts), key=lambda d: d["id"])
+def _label(sname: str, agg: str) -> str:
+    return f"{sname.replace('_', ' ')} ({agg.replace('_', ' ')})"
 
 
-def _eval_leaf(leaf: Leaf, default_policy: str, inputs: ResidentInputs, on: date) -> Res:
-    policy = leaf.missing_data_policy or default_policy
-    if leaf.field == "resident.age_years":
-        return _eval_age(leaf, policy, inputs, on)
-    if leaf.field == "resident.sex":
-        return _eval_sex(leaf, policy, inputs)
-    if leaf.field in CLINICAL_FIELDS:
-        return _eval_clinical(leaf, policy, inputs, on)
-    return _eval_evidence(leaf, policy, inputs)
+def _tri(v: bool | None) -> str:
+    return "unknown" if v is None else str(v).lower()
 
 
-# ---------------------------------------------------------------- expression tree (Kleene logic)
-def _combine_and(results: list[Res]) -> Res:
-    failed = [r for r in results if r.outcome == "failed"]
-    if failed:
-        return Res("failed", "At least one required condition failed.", _merge_refs(failed))
-    unknown = [r for r in results if r.outcome == "unknown"]
-    if unknown:
-        return Res("unknown", "No condition failed but at least one is unknown.", _merge_refs(unknown), any(r.review for r in unknown))
-    return Res("passed", "All conditions passed.", _merge_refs(results))
-
-
-def _combine_or(results: list[Res]) -> Res:
-    passed = [r for r in results if r.outcome == "passed"]
-    if passed:
-        return Res("passed", "At least one alternative passed.", _merge_refs(passed))
-    unknown = [r for r in results if r.outcome == "unknown"]
-    if unknown:
-        return Res("unknown", "No alternative passed but at least one is unknown.", _merge_refs(unknown), any(r.review for r in unknown))
-    return Res("failed", "No alternative passed.", _merge_refs(results))
-
-
-def _merge_refs(results: list[Res]) -> list[dict[str, str]]:
-    seen: dict[tuple[str, str], dict[str, str]] = {}
+def _merge(results: list[Tri]) -> list[dict[str, Any]]:
+    seen: dict[tuple[str, str], dict[str, Any]] = {}
     for r in results:
         for ref in r.refs:
             seen[(ref["type"], ref.get("id") or ref.get("attribute", ""))] = ref
     return [seen[k] for k in sorted(seen)]
 
 
-class _Walker:
-    def __init__(self, default_policy: str, inputs: ResidentInputs, on: date, scope: str, sink: list[CriterionResult]):
-        self.default_policy, self.inputs, self.on, self.scope, self.sink = default_policy, inputs, on, scope, sink
-
-    def node(self, node: Any) -> Res:
-        if isinstance(node, Leaf):
-            res = _eval_leaf(node, self.default_policy, self.inputs, self.on)
-            self.sink.append(
-                CriterionResult(node.id, self.scope, node.label, res.outcome, res.text, res.refs,
-                                res.review and res.outcome == "unknown", node.field)  # fmt: skip
-            )
-            return res
-        if isinstance(node, NotGroup):
-            inner = self.node(node.condition)
-            flipped = {"passed": "failed", "failed": "passed", "unknown": "unknown"}[inner.outcome]
-            return Res(flipped, f"NOT of: {inner.text}", inner.refs, inner.review)
-        results = [self.node(child) for child in node.conditions]
-        return _combine_and(results) if isinstance(node, AndOrGroup) and node.operator == "AND" else _combine_or(results)
+def _conflicts(results: list[Tri]) -> list[dict[str, Any]]:
+    return [c for r in results for c in r.conflicts]
 
 
 # ---------------------------------------------------------------- the evaluation
-def evaluate_rule(rule: RuleDefinition, inputs: ResidentInputs, evaluation_date: date) -> RuleResult:
-    """Evaluate one rule for one resident on `evaluation_date`. Never raises: failures become `evaluation_error`."""
-    criteria: list[CriterionResult] = []
+def evaluate_guideline(
+    definition: GuidelineDefinition,
+    inputs: ResidentInputs,
+    evaluation_date: date,
+    sources: Sequence[dict[str, Any]] = (),
+    eligible_explanation: str | None = None,
+) -> GuidelineResult:
+    """Evaluate one guideline version for one resident on `evaluation_date`. Never raises: errors become
+    `evaluation_error`."""  # noqa: E501
     try:
-        return _evaluate(rule, inputs, evaluation_date, criteria)
-    except Exception as exc:  # noqa: BLE001 - a rule execution error is a recorded outcome (08 §12), not a crash
-        criteria.append(
-            CriterionResult("engine.error", "engine", None, "error", f"{type(exc).__name__}: {str(exc)[:200]}")
+        return _evaluate(definition, inputs, evaluation_date, sources, eligible_explanation)
+    except Exception as exc:  # noqa: BLE001 - a rule execution error is a recorded outcome, not a crash
+        crit = CriterionResult(
+            "engine.error",
+            "prerequisite",
+            0,
+            None,
+            "error",
+            "evaluation_error",
+            None,
+            f"{type(exc).__name__}: {str(exc)[:200]}",
+            "evaluation_error",
+            [],
         )
-        return RuleResult("evaluation_error", "evaluation_error", criteria, [], [], [])
-
-
-def _evaluate(rule: RuleDefinition, inputs: ResidentInputs, on: date, criteria: list[CriterionResult]) -> RuleResult:
-    resident = inputs.resident
-    if resident.deceased_date is not None and resident.deceased_date <= on:
-        criteria.append(
-            CriterionResult("engine.resident_alive", "engine", "Resident is alive on the evaluation date", "failed",
-                            f"Deceased on {resident.deceased_date.isoformat()}, on or before {on.isoformat()}.",
-                            [{"type": "resident_attribute", "attribute": "deceased_date"}])  # fmt: skip
+        return GuidelineResult(
+            "evaluation_error",
+            "error",
+            "evaluation_error",
+            None,
+            "evaluation_error",
+            None,
+            [crit],
+            [],
+            [],
+            [],
+            [],
+            [],
         )
-        for e in rule.exclusions:
-            criteria.append(_skipped(e.id, f"exclusion:{e.id}", e.label))
-        return RuleResult("not_eligible", "resident_deceased", criteria, _refs_of(criteria), [], [])
 
-    walker = _Walker(rule.missing_data_policy, inputs, on, "inclusion", criteria)
-    inclusion = walker.node(rule.inclusion)
-    criteria.append(CriterionResult("inclusion", "inclusion", "Inclusion criteria", inclusion.outcome, inclusion.text, inclusion.refs, inclusion.review and inclusion.outcome == "unknown"))  # fmt: skip
 
-    excl_results: list[tuple[Any, Res]] = []
-    if inclusion.outcome == "failed":
-        for e in rule.exclusions:
-            criteria.append(_skipped(e.id, f"exclusion:{e.id}", e.label))
-        return RuleResult("not_eligible", "inclusion_not_met", criteria, _refs_of(criteria), [], [])
-
-    for e in rule.exclusions:
-        res = _Walker(rule.missing_data_policy, inputs, on, f"exclusion:{e.id}", criteria).node(e.condition)
-        criteria.append(CriterionResult(e.id, f"exclusion:{e.id}", e.label, res.outcome, res.text, res.refs, res.review and res.outcome == "unknown"))  # fmt: skip
-        excl_results.append((e, res))
-
-    applied = [(e, r) for e, r in excl_results if r.outcome == "passed"]
-    exclusion_reasons = [
-        {"exclusion_id": e.id, "outcome": e.outcome, "label": e.label, "evidence_refs": r.refs} for e, r in applied
-    ]
-    unknown_excl = [(e, r) for e, r in excl_results if r.outcome == "unknown"]
-    outcome, basis = _decide(inclusion, applied, unknown_excl)
-    # ponytail: lists every unknown leaf of an indeterminate evaluation, including ones inside an already-decided OR
-    # branch; narrow to "required" unknowns if reviewers find that noisy.
-    group_ids = {"inclusion", *(e.id for e in rule.exclusions)}
+def _evaluate(
+    d: GuidelineDefinition,
+    inputs: ResidentInputs,
+    on: date,
+    sources: Sequence[dict[str, Any]],
+    eligible_text: str | None,
+) -> GuidelineResult:
+    r = inputs.resident
+    if r.deceased_date is not None and r.deceased_date <= on:
+        crit = CriterionResult(
+            "engine.resident_alive",
+            "prerequisite",
+            0,
+            False,
+            "failed",
+            "not_eligible",
+            None,
+            f"deceased on {r.deceased_date.isoformat()}, on or before {on.isoformat()}",
+            "resident_deceased",
+            [{"type": "resident_attribute", "attribute": "deceased_date"}],
+        )
+        return GuidelineResult(
+            "not_eligible",
+            "ineligible",
+            "resident_deceased",
+            None,
+            "resident_deceased",
+            crit.detail,
+            [crit],
+            crit.refs,
+            [],
+            [],
+            [],
+            [],
+        )
+    ev = _Eval(d, inputs, on)
+    criteria: list[CriterionResult] = []
+    conflicts: list[dict[str, Any]] = []
+    unknown_flags: dict[str, bool] = {}
+    for rule in sorted(d.rules, key=lambda x: (x.priority, x.rule_id)):
+        t = ev.node(rule.expression)
+        value = t.value
+        if value is None and rule.missing_data_policy == "not_satisfied":
+            value = False
+        key = _tri(value)
+        outcome = rule.criterion_semantics.for_result(value)
+        contribution = rule.outcome_by_expression_result.for_result(value)
+        review_class = rule.review_class
+        if value is None and rule.missing_data_policy == "review_required":
+            contribution = "requires_clinical_review"
+        reason = (rule.reason_code_when_unknown or rule.reason_code) if value is None else rule.reason_code
+        template = (rule.explanation_templates or {}).get(key)
+        detail = (template or t.text)[:400]
+        criteria.append(
+            CriterionResult(
+                rule.rule_id,
+                rule.rule_type,
+                rule.priority,
+                value,
+                outcome,
+                contribution,
+                review_class,
+                detail,
+                reason,
+                t.refs,
+                t.review and value is None,
+            )
+        )
+        conflicts.extend(t.conflicts)
+        unknown_flags[rule.rule_id] = value is None
+    outcome, step_rank, primary = _decide(d, criteria)
+    outcome_class = OUTCOME_CLASS[outcome]
+    refs = _merge([Tri(None, "", c.refs) for c in criteria])
     missing = (
         [
-            {"criterion_id": c.criterion_id, "scope": c.scope, "field": c.field, "reason": c.explanation}
+            {"criterion_id": c.rule_id, "reason_code": c.reason_code, "detail": c.detail}
             for c in criteria
-            if c.outcome == "unknown" and c.criterion_id not in group_ids
+            if c.outcome == "unknown"
         ]
-        if OUTCOME_CLASS[outcome] == "indeterminate"
+        if outcome_class == "indeterminate"
         else []
     )
-    return RuleResult(outcome, basis, criteria, _refs_of(criteria), missing, exclusion_reasons)
+    exclusions = [
+        {
+            "rule_id": c.rule_id,
+            "reason_code": c.reason_code,
+            "outcome": c.contribution,
+            "evidence_refs": c.refs,
+        }
+        for c in criteria
+        if c.rule_type == "exclusion" and c.outcome == "failed"
+    ]
+    if outcome == "eligible":
+        reason, basis, text = None, "all_criteria_met", eligible_text
+    else:
+        assert primary is not None
+        reason, basis, text = primary.reason_code, f"decision_step_{step_rank}", primary.detail
+    return GuidelineResult(
+        outcome,
+        outcome_class,
+        reason,
+        primary.rule_id if primary else None,
+        basis,
+        text,
+        criteria,
+        refs,
+        missing,
+        _dedupe(conflicts),
+        exclusions,
+        _source_refs(d, criteria, primary, sources),
+    )
 
 
-def _decide(inclusion: Res, applied: list[tuple[Any, Res]], unknown_excl: list[tuple[Any, Res]]) -> tuple[str, str]:
-    applied_outcomes = {e.outcome for e, _ in applied}
-    for outcome in _EXCLUSION_PRECEDENCE[:-1]:  # definitive ineligible-class exclusions win, even over unknown inclusion
-        if outcome in applied_outcomes:
-            return outcome, "exclusion_applied"
-    if "requires_clinical_review" in applied_outcomes:
-        return "requires_clinical_review", "exclusion_requires_review"
-    if inclusion.outcome == "unknown" or unknown_excl:
-        review = (inclusion.outcome == "unknown" and inclusion.review) or any(r.review for _, r in unknown_excl)
-        return ("requires_clinical_review" if review else "insufficient_evidence"), "missing_information"
-    return "eligible", "all_criteria_met"
+def _decide(
+    d: GuidelineDefinition, criteria: list[CriterionResult]
+) -> tuple[str, int | None, CriterionResult | None]:
+    """The best-ranked contribution wins; the primary reason comes from its lowest-priority-number rule."""
+    for step in d.decision_policy.steps[:-1]:
+        matching = [
+            c
+            for c in criteria
+            if c.contribution == step.outcome and step.only_rules_with_review_class in (None, c.review_class)
+        ]
+        if matching:
+            # type: ignore[return-value]
+            return step.outcome, step.rank, min(matching, key=lambda c: (c.priority, c.rule_id))
+    return d.decision_policy.steps[-1].otherwise or "eligible", None, None
 
 
-def _skipped(cid: str, scope: str, label: str | None) -> CriterionResult:
-    return CriterionResult(cid, scope, label, "not_applicable", "Not evaluated because the inclusion criteria were not met.")
+def _dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out, seen = [], set()
+    for it in items:
+        key = canonical_hash(it)
+        if key not in seen:
+            seen.add(key)
+            out.append(it)
+    return out
 
 
-def _refs_of(criteria: list[CriterionResult]) -> list[dict[str, str]]:
-    return _merge_refs([Res("", "", c.evidence_refs) for c in criteria if c.outcome in ("passed", "failed", "unknown")])
+_META_KEYS = ("source_status", "assumption", "pathways")
 
 
-# ---------------------------------------------------------------- input snapshot / hash (incremental evaluation)
+def _source_refs(
+    d: GuidelineDefinition,
+    criteria: list[CriterionResult],
+    primary: CriterionResult | None,
+    sources: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Citations behind the decision: the primary criterion's rule, else the inclusion rules (08 §4.4), with
+    the rule's
+    source metadata (publication dates, recommendation status, applicability, interval, grade) as the draft
+    states it."""
+    by_id = {s.get("source_id"): s for s in sources}
+    wanted = [primary.rule_id] if primary else [c.rule_id for c in criteria if c.rule_type == "inclusion"]
+    out: list[dict[str, Any]] = []
+    for rule in d.rules:
+        if rule.rule_id not in wanted:
+            continue
+        extra = rule.model_extra or {}
+        refs = []
+        for raw in extra.get("source_refs", []) or []:
+            sid, _, excerpt = str(raw).partition("#")
+            src = by_id.get(sid, {})
+            refs.append(
+                {
+                    k: v
+                    for k, v in {
+                        "source_id": sid,
+                        "excerpt_id": excerpt or None,
+                        "title": src.get("title"),
+                        "url": src.get("url"),
+                        "publication_date": src.get("publication_date"),
+                        "citation": src.get("citation"),
+                        "grade_or_strength": src.get("grade_or_strength"),
+                    }.items()
+                    if v is not None
+                }
+            )
+        meta = {k: extra[k] for k in _META_KEYS if k in extra}
+        if isinstance(extra.get("source_metadata"), dict):
+            meta["source_metadata"] = extra["source_metadata"]
+        out.append({"rule_id": rule.rule_id, "references": refs, **({"metadata": meta} if meta else {})})
+    return out
+
+
+# ---------------------------------------------------------------- input snapshot / hash (incremental
+# evaluation)
 @dataclass(frozen=True, slots=True)
-class RuleDeps:
-    """The inputs a rule can depend on (08 §15.2); computed once per rule version, reused for every resident."""
+class GuidelineDeps:
+    """The inputs a guideline version can depend on (08 §15.2); computed once, reused for every resident."""
 
     uses_birth_date: bool
     uses_sex: bool
-    clinical_categories: frozenset[str]
-    codes: frozenset[tuple[str, str]]
-    evidence_categories: frozenset[str]
+    selectors: tuple[tuple[str, Selector], ...]
+    coverage_years: int | None
 
     @classmethod
-    def of(cls, rule: RuleDefinition) -> RuleDeps:
-        leaves = rule.leaves()
+    def of(cls, d: GuidelineDefinition) -> GuidelineDeps:
+        used = sorted({n for r in d.rules for n in r.selectors_used()})
+        leaves = [lf for r in d.rules for lf in leaves_of(r.expression)]
+        cov = [
+            d.selectors[n].lookback_years or DEFAULT_COVERAGE_YEARS
+            for n in used
+            if d.selectors[n].is_coverage
+        ]
         return cls(
-            any(lf.field == "resident.age_years" for lf in leaves),
-            any(lf.field == "resident.sex" for lf in leaves),
-            frozenset(CLINICAL_FIELDS[lf.field] for lf in leaves if lf.field in CLINICAL_FIELDS),
-            frozenset(c for lf in leaves if lf.field in CLINICAL_FIELDS for c in lf.codeset),
-            frozenset(lf.category for lf in leaves if lf.field == "evidence.fact" and lf.category),
+            any(lf.field == AGE_FIELD for lf in leaves),
+            any(lf.field == SEX_FIELD for lf in leaves),
+            tuple((n, d.selectors[n]) for n in used if not d.selectors[n].is_coverage),
+            cov[0] if cov else None,
         )
 
+    def needs(self, f: Fact) -> bool:
+        return any(_classify(sel, f) is not None for _, sel in self.selectors)
 
-def input_snapshot(deps: RuleDeps, rule_hash: str, inputs: ResidentInputs, evaluation_date: date) -> dict[str, Any]:
-    """Everything the evaluation can depend on, in canonical form. Hashing this gives the incremental-skip key."""
+
+def input_snapshot(
+    deps: GuidelineDeps, content_hash: str, inputs: ResidentInputs, evaluation_date: date
+) -> dict[str, Any]:
     r = inputs.resident
-    codes = deps.codes
-    records = sorted(
-        (
-            [str(x.id), x.category, x.code_system, x.code, x.normalized_code_system, x.normalized_code,
-             x.start.isoformat() if x.start else None, x.status]
-            for x in inputs.records
-            if x.category in deps.clinical_categories
-            and ((x.code_system, x.code) in codes or (x.normalized_code_system, x.normalized_code) in codes)
-        ),
-        key=lambda row: row[0],
-    )  # fmt: skip
     facts = sorted(
         (
-            [str(f.id), f.category, f.fact_type, f.subject_type, f.relationship, f.assertion, f.temporal,
-             f.age_at_onset, f.validation_status]
+            [
+                f.id,
+                f.source,
+                f.category,
+                f.fact_type,
+                f.code_system,
+                f.code,
+                f.subject_type,
+                f.relationship,
+                f.subject_key,
+                f.assertion,
+                f.temporal,
+                f.validation,
+                f.date_start.isoformat() if f.date_start else None,
+                f.date_end.isoformat() if f.date_end else None,
+                f.onset,
+            ]
             for f in inputs.facts
-            if f.category in deps.evidence_categories and f.validation_status == "accepted"
+            if deps.needs(f)
         ),
-        key=lambda row: row[0],
-    )  # fmt: skip
+        key=lambda row: (row[0], row[1]),
+    )
+    covered = None
+    if deps.coverage_years is not None:
+        lo = shift_back(evaluation_date, deps.coverage_years)
+        last = inputs.latest_record_date
+        covered = last is not None and lo < last <= evaluation_date
     return {
         "engine": ENGINE_VERSION,
         "input_schema": INPUT_SCHEMA_VERSION,
-        "rule_hash": rule_hash,
+        "guideline_hash": content_hash,
         "evaluation_date": evaluation_date.isoformat(),
         "resident": {
             "id": str(r.id),
@@ -542,10 +988,31 @@ def input_snapshot(deps: RuleDeps, rule_hash: str, inputs: ResidentInputs, evalu
             "sex": r.sex if deps.uses_sex else None,
             "deceased_date": r.deceased_date.isoformat() if r.deceased_date else None,
         },
-        "records": records,
+        "covered": covered,
         "facts": facts,
     }
 
 
-def input_hash(deps: RuleDeps, rule_hash: str, inputs: ResidentInputs, evaluation_date: date) -> str:
-    return canonical_hash(input_snapshot(deps, rule_hash, inputs, evaluation_date))
+def input_hash(deps: GuidelineDeps, content_hash: str, inputs: ResidentInputs, evaluation_date: date) -> str:
+    return canonical_hash(input_snapshot(deps, content_hash, inputs, evaluation_date))
+
+
+__all__ = [
+    "CLINICAL_REVIEW_STATUSES",
+    "ENGINE_VERSION",
+    "REVIEW_DONE",
+    "REVIEW_PENDING",
+    "CriterionResult",
+    "Fact",
+    "GuidelineDeps",
+    "GuidelineResult",
+    "ResidentFacts",
+    "ResidentInputs",
+    "Rule",
+    "age_years",
+    "evaluate_guideline",
+    "input_hash",
+    "parse_partial_date",
+    "record_to_fact",
+    "shift_back",
+]

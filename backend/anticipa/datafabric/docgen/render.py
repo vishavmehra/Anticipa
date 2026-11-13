@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Render a planned document (DocSpec) into text, recording the exact code-point span of every planted quote.
 
 Offsets are measured on the final stored text (0-based, half-open, Python `str` indices), accumulated while the text is
@@ -13,7 +14,17 @@ from dataclasses import dataclass, field
 
 from anticipa.datafabric.docgen.context import ResidentContext
 from anticipa.datafabric.docgen.phrases import (
-    CONDITIONS, HI_DID, OTHER_PERSONS, PROCEDURES, QUOTE_CLOSE, QUOTE_OPEN, RELATIONS, SEX, T, format_date, native_digits,
+    CONDITIONS,
+    HI_DID,
+    OTHER_PERSONS,
+    PROCEDURES,
+    QUOTE_CLOSE,
+    QUOTE_OPEN,
+    RELATIONS,
+    SEX,
+    T,
+    format_date,
+    native_digits,
 )
 from anticipa.datafabric.docgen.planner import SECTION_ORDER, DocSpec, Item, age_on
 
@@ -143,9 +154,18 @@ def render_doc(spec: DocSpec, ctx: ResidentContext, rng: random.Random) -> Rende
     out.add("\n")
     out.line(tpl[f"title.{spec.doc_type}"][0])
     out.line(tpl["hdr_id"][0].format(pid=pid))
-    out.line(tpl["hdr_date"][0].format(date=native_digits(spec.when.isoformat(), lang) if native else spec.when.isoformat()))
+    out.line(
+        tpl["hdr_date"][0].format(
+            date=native_digits(spec.when.isoformat(), lang) if native else spec.when.isoformat()
+        )
+    )
     age = age_on(ctx.birth_date, spec.when)
-    out.line(tpl["hdr_agesex"][0].format(age=native_digits(str(age), lang) if native else age, sex=SEX[lang].get(ctx.sex, SEX[lang]["unknown"])))
+    out.line(
+        tpl["hdr_agesex"][0].format(
+            age=native_digits(str(age), lang) if native else age,
+            sex=SEX[lang].get(ctx.sex, SEX[lang]["unknown"]),
+        )
+    )
     out.add("\n")
     if spec.doc_type == "referral_letter":
         plain("salutation")

@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 MODULES = (
     "datafabric", "datafabric.docgen", "ai", "evidence", "guidelines", "caregaps", "planning",
-    "engagement", "closure", "analytics", "evaluation",
+    "engagement", "consent", "conversation", "closure", "analytics", "evaluation", "ask",
 )  # fmt: skip
 
 

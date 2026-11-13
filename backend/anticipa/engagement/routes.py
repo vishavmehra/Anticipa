@@ -86,7 +86,8 @@ class DraftOut(BaseModel):
     language_source: str
     direction: str
     body: str
-    channels: list[str]
+    channels: list[str]  # channels the resident has not opted out of
+    blocked_channels: list[str] = []  # opted out (consent_denied): recording outreach on them is a 409
     constraints_checked: bool
     simulated: bool
     synthetic_status: str

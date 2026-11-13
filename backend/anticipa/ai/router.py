@@ -14,6 +14,7 @@ import logging
 import random
 import time
 import uuid
+from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -80,6 +81,10 @@ class ModelRouter:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[], float] = random.random,
         daily_budget_usd: Decimal | None = None,
+        run_budget_usd: Decimal | None = None,
+        initial_run_spend: Decimal = _NO_COST,
+        enabled_providers: frozenset[str] | None = None,
+        provider_credit_usd: dict[str, Decimal] | None = None,
     ) -> None:
         self.config = config
         self.adapters = adapters
@@ -90,6 +95,16 @@ class ModelRouter:
         self._sems = {name: asyncio.Semaphore(p.max_concurrency) for name, p in config.providers.items()}
         self.daily_budget_usd = daily_budget_usd  # None = no guard (tests, offline tools)
         self._reserved = Decimal(0)  # in-flight worst-case reservations + completed-but-unrecorded cost
+        # Per-run cap: this router instance is one run (a job). `_run_spent` is everything billed so far
+        # (seeded with an earlier attempt's spend when a job resumes); `_inflight` the open reservations.
+        self.run_budget_usd = run_budget_usd
+        self._run_spent = initial_run_spend
+        self._inflight = Decimal(0)
+        # None = every provider; otherwise candidates of other providers are dropped at routing time.
+        self.enabled_providers = enabled_providers
+        # Lifetime per-provider credit ledger (recorded spend + this router's in-flight/unrecorded cost).
+        self.provider_credit_usd = provider_credit_usd or {}
+        self._held: dict[str, Decimal] = defaultdict(Decimal)  # per-provider in-flight reservations + pending
 
     # ------------------------------------------------------------------ routing helpers
     def _route(self, task: str, kind: str) -> TaskConfig:
@@ -98,7 +113,20 @@ class ModelRouter:
             raise RouterError("invalid_request", f"unknown task {task!r}")
         if route.kind != kind:
             raise RouterError("invalid_request", f"task {task!r} is a {route.kind} task, not {kind}")
-        return route
+        if self.enabled_providers is None:
+            return route
+        allowed = [c for c in route.candidates if c.provider in self.enabled_providers]
+        if not allowed:
+            raise RouterError(
+                "invalid_request",
+                f"task {task!r} has no enabled provider (candidates: "
+                f"{', '.join(c.ref for c in route.candidates)}; Nebius needs ANTICIPA_ENABLE_NEBIUS=1)",
+            )
+        return route.model_copy(update={"candidates": allowed})
+
+    @property
+    def run_spent_usd(self) -> Decimal:
+        return self._run_spent
 
     def _adapter(self, cand: Candidate) -> Any:
         adapter = self.adapters.get(cand.provider)
@@ -120,17 +148,48 @@ class ModelRouter:
 
     @asynccontextmanager
     async def _reserve(self, est: Decimal, cand: Candidate) -> AsyncIterator[None]:
-        """Spend guard: refuse the provider call if recorded spend today + everything in flight + this call's
-        worst case would exceed the daily budget. Reserve first, then read the sink, so concurrent callers see
-        each other. If today's spend cannot be read the guard fails closed."""
+        """Spend guards: refuse the provider call if this run's spend + everything in flight + this
+        call's worst
+        case would exceed the per-run budget, or if recorded spend today + the same would exceed the daily
+        budget. Reserve first, then read the sink, so concurrent callers see each other. If today's spend
+        cannot be read the guard fails closed."""
         self._reserved += est
+        self._inflight += est
+        self._held[cand.provider] += est
         try:
+            kw: dict[str, Any] = {"provider": cand.provider, "model_id": cand.model_id, "retryable": False}
+            credit = self.provider_credit_usd.get(cand.provider)
+            if credit is not None:
+                try:
+                    spent_p = await self.sink.spent_total_usd(cand.provider)
+                except Exception:  # noqa: BLE001
+                    log.exception(
+                        "cannot read %s spend; refusing the provider call (fail closed)", cand.provider
+                    )
+                    raise RouterError(
+                        "budget_exceeded", f"{cand.provider} credit ledger could not be read", **kw
+                    ) from None
+                if spent_p + self._held[cand.provider] > credit:
+                    raise RouterError(
+                        "budget_exceeded",
+                        f"{cand.provider} credit ${credit} would be exceeded "
+                        f"(spent ${spent_p:.4f}, this call up to ${est:.4f})",
+                        **kw,
+                    )
+            if self.run_budget_usd is not None and self._run_spent + self._inflight > self.run_budget_usd:
+                log.warning(
+                    "per-run AI budget guard tripped: spent=%s in_flight=%s budget=%s",
+                    self._run_spent,
+                    self._inflight - est,
+                    self.run_budget_usd,
+                )
+                raise RouterError(
+                    "budget_exceeded",
+                    f"per-run AI budget ${self.run_budget_usd} would be exceeded "
+                    f"(run spent ${self._run_spent:.4f}, this call up to ${est:.4f})",
+                    **kw,
+                )
             if self.daily_budget_usd is not None:
-                kw: dict[str, Any] = {
-                    "provider": cand.provider,
-                    "model_id": cand.model_id,
-                    "retryable": False,
-                }
                 try:
                     spent = await self.sink.spent_today_usd()
                 except Exception:  # noqa: BLE001
@@ -156,6 +215,8 @@ class ModelRouter:
             yield
         finally:
             self._reserved -= est
+            self._inflight -= est
+            self._held[cand.provider] -= est
 
     async def _guarded_generate(
         self, adapter: Any, cand: Candidate, model: ModelConfig, call: AdapterCall
@@ -380,6 +441,8 @@ class ModelRouter:
                     usage = usage + resp.usage
                     spent_now = model.cost(resp.usage)
                     self._reserved += spent_now
+                    self._run_spent += spent_now
+                    self._held[cand.provider] += spent_now
                     pending += spent_now
                     if req.output_schema is None:
                         output: Any = resp.text
@@ -478,6 +541,7 @@ class ModelRouter:
             )
         finally:
             self._reserved -= pending
+            self._held[cand.provider] -= pending
 
     # ------------------------------------------------------------------ embed
     async def embed(self, req: EmbedRequest) -> EmbedResult:
@@ -536,6 +600,8 @@ class ModelRouter:
                     usage, retries = usage + u, retries + used
                     spent_now = model.cost(u)
                     self._reserved += spent_now
+                    self._run_spent += spent_now
+                    self._held[cand.provider] += spent_now
                     pending += spent_now
             except RouterError as e:
                 if not (e.category == "budget_exceeded" and usage.total_tokens == 0):
@@ -591,6 +657,7 @@ class ModelRouter:
             )
         finally:
             self._reserved -= pending
+            self._held[cand.provider] -= pending
 
     async def aclose(self) -> None:
         for adapter in self.adapters.values():
@@ -602,24 +669,32 @@ def build_router(
     settings: AiSettings | None = None,
     config: RouterConfig | None = None,
     sink: InvocationSink | None = None,
+    *,
+    run_budget: bool | Decimal = False,
+    initial_run_spend: Decimal = _NO_COST,
 ) -> ModelRouter:
-    """Load models.toml, enforce the catalogue (CatalogueError at start-up), wire adapters from .env."""
+    """Load models.toml, enforce the catalogue (CatalogueError at start-up), wire adapters from .env.
+
+    Nebius is only wired when ANTICIPA_ENABLE_NEBIUS=1; otherwise its candidates are dropped at routing time.
+    `run_budget=True` applies ANTICIPA_AI_RUN_BUDGET_USD to this router instance (one job run); a Decimal
+    applies that amount instead (the approved limit of a Nebius run)."""
     settings = settings or get_ai_settings()
     config = config or load_config()
     validate_config(config)
+    enabled = settings.enabled_providers
     adapters: dict[str, Any] = {}
     if settings.anthropic_api_key:
         adapters["anthropic"] = ClaudeAdapter(
             settings.anthropic_api_key.get_secret_value(), config.provider("anthropic")
         )
-    if settings.nebius_api_key:
+    if settings.nebius_api_key and "nebius" in enabled:
         base = settings.nebius_base_url or config.provider("nebius").base_url
         if not base:
             raise RuntimeError("Nebius base URL missing: set NEBIUS_BASE_URL or providers.nebius.base_url")
         adapters["nebius"] = NebiusAdapter(
             settings.nebius_api_key.get_secret_value(), base, config.provider("nebius")
         )
-    used = {c.provider for t in config.tasks.values() for c in t.candidates}
+    used = {c.provider for t in config.tasks.values() for c in t.candidates} & enabled
     for missing in sorted(used - adapters.keys()):
         log.warning(
             "provider %s has routes but no API key in .env; those candidates will be skipped", missing
@@ -631,6 +706,21 @@ def build_router(
         sink or InMemorySink(),
         cache=cache,
         daily_budget_usd=settings.anticipa_ai_daily_budget_usd,
+        run_budget_usd=(
+            run_budget
+            if isinstance(run_budget, Decimal)
+            else (settings.anticipa_ai_run_budget_usd if run_budget else None)
+        ),
+        initial_run_spend=initial_run_spend,
+        enabled_providers=enabled,
+        provider_credit_usd={
+            "nebius": settings.anticipa_nebius_credit_usd,
+            **(
+                {"anthropic": settings.anticipa_anthropic_spend_cap_usd}
+                if settings.anticipa_anthropic_spend_cap_usd is not None
+                else {}
+            ),
+        },
     )
 
 

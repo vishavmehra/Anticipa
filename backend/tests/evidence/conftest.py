@@ -37,25 +37,35 @@ def evidence_db():
     from anticipa.db import make_engine, make_sessionmaker
 
     settings = Settings()
-    if not settings.is_local or settings.database_url is not None:
+    if not settings.is_local:
         pytest.skip("integration tests run only against the local docker Postgres")
+    local_hosts = {"localhost", "127.0.0.1", "::1"}
+    candidates: list[URL] = []
+    if settings.database_url is not None:  # .env DATABASE_URL: reuse its credentials, never its database name
+        from sqlalchemy.engine import make_url
+
+        from anticipa.config import normalize_db_url
+
+        u = make_url(normalize_db_url(settings.database_url.get_secret_value()))
+        if u.host not in local_hosts:
+            pytest.skip("DATABASE_URL points at a remote database; integration tests only use the local one")
+        candidates.append(u)
     # Not settings.sqlalchemy_url(): that needs a configured password. The local container's documented dev default
-    # (.env.example / docker-compose.yml) is the fallback, and the database name is always forced to anticipa_test.
+    # (.env.example / docker-compose.yml) is the fallback.
     password = (
         settings.postgres_password.get_secret_value() if settings.postgres_password else "anticipa-dev-only"
     )
     host = "127.0.0.1" if settings.postgres_host == "localhost" else settings.postgres_host
-    # The compose port may be remapped (POSTGRES_PORT) when another Postgres owns 5432: try the configured one first.
     for port in dict.fromkeys([settings.postgres_port, 5433]):
-        base = URL.create(
-            "postgresql+psycopg",
-            username=settings.postgres_user,
-            password=password,
-            host=host,
-            port=port,
-            database="postgres",
-            query={"connect_timeout": "3"},
+        candidates.append(
+            URL.create(
+                "postgresql+psycopg", username=settings.postgres_user, password=password, host=host, port=port
+            )
         )
+    for cand in candidates:
+        if cand.host == "localhost":
+            cand = cand.set(host="127.0.0.1")
+        base = cand.set(database="postgres", query={"connect_timeout": "3"})
         try:
             admin = make_engine(base, isolation_level="AUTOCOMMIT")
             with admin.connect() as c:
@@ -80,7 +90,7 @@ def evidence_db():
             cfg.set_main_option("script_location", str(BACKEND / "alembic"))
             cfg.attributes["url"] = url
             cfg.attributes["configure_logging"] = False
-            command.upgrade(cfg, "head")
+            command.upgrade(cfg, "heads")  # tolerate parallel migration heads (reported to the architect)
         finally:
             c.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": MIGRATION_LOCK})
     yield make_sessionmaker(engine)
@@ -110,7 +120,7 @@ class World:
             s.add(Dataset(id=self.dataset_id, dataset_version=f"test-{self.tag}", generator="pytest"))
             s.commit()
 
-    def resident(self) -> uuid.UUID:
+    def resident(self, **attrs) -> uuid.UUID:
         from anticipa.datafabric.models import Resident
 
         rid = uuid.uuid4()
@@ -121,6 +131,7 @@ class World:
                     dataset_id=self.dataset_id,
                     source_system="pytest",
                     source_patient_id=f"{self.tag}-{len(self.residents)}",
+                    **attrs,
                 )
             )
             s.commit()

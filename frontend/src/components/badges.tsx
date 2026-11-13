@@ -1,26 +1,19 @@
 import type { ReactNode } from "react";
+import { DataLabel } from "./ui";
 
-/** Persistent notice on every page (CLAUDE.md §4 principle 10; contract §8). */
-export function SyntheticBanner() {
-  return (
-    <div
-      role="note"
-      className="hatch sticky top-0 z-40 flex h-(--banner-h) items-center justify-center border-b border-specimen bg-specimen-bg px-4 text-sm font-medium text-specimen"
-    >
-      Synthetic data — not for clinical use
-    </div>
-  );
-}
+/**
+ * Owner decision 2026-11-12: the product UI carries no "synthetic" banner, badge or wording; the disclosure lives in the
+ * README. Source labels are only Live or Evaluation (DataLabel). `SimulatedBadge` stays ONLY on outreach delivery and
+ * booking events, because no real SMS or appointment is ever sent.
+ */
 
-const base =
-  "inline-flex items-center rounded-sm border px-1.5 text-xs font-medium leading-5 whitespace-nowrap text-specimen bg-specimen-bg border-specimen";
-
-/** Label for any value derived from synthetic residents/records. */
-export function SyntheticBadge({ children = "Synthetic" }: { children?: ReactNode }) {
-  return <span className={`${base} hatch`}>{children}</span>;
-}
-
-/** Label for simulated actions (bookings, messages, outcomes). Dashed border distinguishes it. */
+/** Label for simulated actions: outreach delivery and bookings only. */
 export function SimulatedBadge({ children = "Simulated" }: { children?: ReactNode }) {
-  return <span className={`${base} border-dashed`}>{children}</span>;
+  return <DataLabel kind="simulated">{children}</DataLabel>;
+}
+
+/** @deprecated Removed from the UI by owner decision; renders nothing. Delete the call site. */
+export function SyntheticBadge(props: { children?: ReactNode }) {
+  void props;
+  return null;
 }

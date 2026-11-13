@@ -5,7 +5,12 @@ ROLE_PERMISSIONS here, never with ad-hoc role checks.
 Naming makes read-only explicit: `<module>.view` (and `*.view_limited/_scoped/_redacted`) only read;
 anything that changes state, reviews, approves, closes, configures or triggers processing/AI uses
 `.manage/.review/.approve/.close/.execute/.configure`. The `observer` role (hackathon judges, ADR-060)
-holds only view-style permissions, with the audit trail redacted (`audit.view_redacted`).
+holds only view-style permissions.
+
+Internal backend data (jobs, integration health, processing and AI spend) is for operators only (owner
+decision 2026-11-12): `jobs.view` and `integrations.view` belong to system_admin alone, and `system.configure`
+(also system_admin only) gates GET /analytics/processing. The audit trail stays with population_admin (full)
+and coordinators / reviewers (own actions only). `audit.view_redacted` is defined but no role holds it.
 
 Mapping of the 05 §4.3 qualifiers: Yes/Authorized -> full permission; Limited/scoped -> the
 `*_limited`/`*_scoped` variant; "No by default" -> not granted (grant explicitly if the owner decides).
@@ -41,6 +46,7 @@ CAPACITY_VIEW = "capacity.view"  # clinic capacity and planning results
 ENGAGEMENT_VIEW = "engagement.view"  # outreach/communications
 APPOINTMENTS_VIEW = "appointments.view"
 CLOSURE_VIEW = "closure.view"
+CONSENT_VIEW = "consent.view"  # a resident's outreach / AI-processing consent decisions (ADR-070)
 JOBS_VIEW = "jobs.view"
 INTEGRATIONS_VIEW = "integrations.view"
 AUDIT_VIEW = "audit.view"
@@ -58,41 +64,44 @@ CAPACITY_MANAGE = "capacity.manage"
 CAREGAPS_MANAGE = "caregaps.manage"
 CAREGAPS_CLOSE = "caregaps.close"
 CAREGAPS_REVIEW = "caregaps.review"
+CONSENT_MANAGE = "consent.manage"  # record a resident's permit / deny decision
 SYSTEM_CONFIGURE = "system.configure"
 
 VIEW_PERMISSIONS: frozenset[str] = frozenset({
     ANALYTICS_VIEW, ANALYTICS_VIEW_LIMITED, RESIDENTS_VIEW, RECORDS_VIEW, DOCUMENTS_VIEW, EVIDENCE_VIEW,
     GUIDELINES_VIEW, RULES_VIEW, CAREGAPS_VIEW, CAPACITY_VIEW, ENGAGEMENT_VIEW, APPOINTMENTS_VIEW,
-    CLOSURE_VIEW, JOBS_VIEW, INTEGRATIONS_VIEW, AUDIT_VIEW, AUDIT_VIEW_SCOPED, AUDIT_VIEW_REDACTED,
+    CLOSURE_VIEW, CONSENT_VIEW, JOBS_VIEW, INTEGRATIONS_VIEW, AUDIT_VIEW, AUDIT_VIEW_SCOPED,
+    AUDIT_VIEW_REDACTED,
 })  # fmt: skip
 
-_ADMIN_VIEWS = {
+# What product users and judges may read: no jobs, integrations or audit.
+_PRODUCT_VIEWS = {
     ANALYTICS_VIEW, RESIDENTS_VIEW, RECORDS_VIEW, DOCUMENTS_VIEW, EVIDENCE_VIEW, GUIDELINES_VIEW,
-    RULES_VIEW, CAREGAPS_VIEW, CAPACITY_VIEW, ENGAGEMENT_VIEW, APPOINTMENTS_VIEW, CLOSURE_VIEW,
-    JOBS_VIEW, INTEGRATIONS_VIEW,
+    RULES_VIEW, CAREGAPS_VIEW, CAPACITY_VIEW, ENGAGEMENT_VIEW, APPOINTMENTS_VIEW, CLOSURE_VIEW, CONSENT_VIEW,
 }  # fmt: skip
 
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     Role.POPULATION_ADMIN: frozenset(
-        _ADMIN_VIEWS | {AUDIT_VIEW, PROCESSING_EXECUTE, CAPACITY_MANAGE, CAREGAPS_MANAGE, CAREGAPS_CLOSE}
+        _PRODUCT_VIEWS
+        | {AUDIT_VIEW, PROCESSING_EXECUTE, CAPACITY_MANAGE, CAREGAPS_MANAGE, CAREGAPS_CLOSE, CONSENT_MANAGE}
     ),
     Role.CARE_COORDINATOR: frozenset({
         ANALYTICS_VIEW_LIMITED, RESIDENTS_VIEW, RECORDS_VIEW, GUIDELINES_VIEW, RULES_VIEW, CAREGAPS_VIEW,
-        CAPACITY_VIEW, ENGAGEMENT_VIEW, APPOINTMENTS_VIEW, CLOSURE_VIEW, INTEGRATIONS_VIEW, AUDIT_VIEW_SCOPED,
-        CAREGAPS_MANAGE, CAREGAPS_CLOSE,
+        CAPACITY_VIEW, ENGAGEMENT_VIEW, APPOINTMENTS_VIEW, CLOSURE_VIEW, CONSENT_VIEW, AUDIT_VIEW_SCOPED,
+        CAREGAPS_MANAGE, CAREGAPS_CLOSE, CONSENT_MANAGE,
     }),
     Role.CLINICAL_REVIEWER: frozenset({
         ANALYTICS_VIEW, RESIDENTS_VIEW, RECORDS_VIEW, DOCUMENTS_VIEW, EVIDENCE_VIEW, GUIDELINES_VIEW,
-        RULES_VIEW, CAREGAPS_VIEW, CLOSURE_VIEW, INTEGRATIONS_VIEW, AUDIT_VIEW_SCOPED,
+        RULES_VIEW, CAREGAPS_VIEW, CLOSURE_VIEW, CONSENT_VIEW, AUDIT_VIEW_SCOPED,
         EVIDENCE_REVIEW, GUIDELINES_APPROVE, CAREGAPS_REVIEW,
     }),
-    Role.SYSTEM_ADMIN: frozenset({
-        ANALYTICS_VIEW, RESIDENTS_VIEW, RECORDS_VIEW, DOCUMENTS_VIEW, GUIDELINES_VIEW, RULES_VIEW,
-        CAREGAPS_VIEW, CAPACITY_VIEW, ENGAGEMENT_VIEW, APPOINTMENTS_VIEW, CLOSURE_VIEW, JOBS_VIEW,
-        INTEGRATIONS_VIEW, AUDIT_VIEW, PROCESSING_EXECUTE, CAPACITY_MANAGE, CAREGAPS_MANAGE, SYSTEM_CONFIGURE,
+    # Sees every page (all product views + System pages); clinical actions stay with clinical_reviewer.
+    Role.SYSTEM_ADMIN: frozenset(_PRODUCT_VIEWS | {
+        JOBS_VIEW, INTEGRATIONS_VIEW, AUDIT_VIEW, PROCESSING_EXECUTE, CAPACITY_MANAGE, CAREGAPS_MANAGE,
+        SYSTEM_CONFIGURE,
     }),
-    # Hackathon judges (ADR-060): everything can be seen (audit trail redacted), nothing can be changed.
-    Role.OBSERVER: frozenset(_ADMIN_VIEWS | {AUDIT_VIEW_REDACTED}),
+    # Judges (ADR-060): every product view, nothing internal (no jobs, integrations, audit), no writes.
+    Role.OBSERVER: frozenset(_PRODUCT_VIEWS),
 }  # fmt: skip
 
 ALL_PERMISSIONS: frozenset[str] = frozenset().union(*ROLE_PERMISSIONS.values())

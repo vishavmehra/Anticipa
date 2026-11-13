@@ -19,13 +19,27 @@ from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
 from anticipa.config import DB_SCHEMA
+from anticipa.consent.service import unreachable_residents
 from anticipa.planning.domain import PlannableCase
 from anticipa.planning.models import PlannedAllocation
 
 PLANNABLE_STATUSES = ("approved_for_planning", "awaiting_capacity")  # 05 §13.4
 
 # care_activity (guideline/care-gap vocabulary) -> clinic service_key. Identity unless listed here.
-CARE_ACTIVITY_SERVICE_KEYS: dict[str, str] = {}
+CARE_ACTIVITY_SERVICE_KEYS: dict[str, str] = {
+    "colorectal_average_risk": "colorectal_screening",
+    "colorectal_family_history": "colorectal_screening",
+    "breast_cancer_screening": "mammography",
+    "brca_risk_assessment": "genetic_counselling",
+    "brca_genetic_counseling_referral": "genetic_counselling",
+    "cervical_cancer_screening": "cervical_screening",
+    # India national screening pack (config/guidelines/rules_india_draft.json). VIA is a cervical screening visit.
+    "india_hypertension_screening": "blood_pressure_check",
+    "india_diabetes_screening": "blood_glucose_check",
+    "india_oral_cancer_screening": "oral_cancer_screening",
+    "india_breast_cancer_screening_cbe": "clinical_breast_exam",
+    "india_cervical_cancer_screening_via": "cervical_screening",
+}
 
 _projection = MetaData(schema=DB_SCHEMA)  # read-only projections; never used for DDL outside tests
 care_gap_cases = Table(
@@ -78,6 +92,7 @@ def load_plannable_cases(session: Session, filters: CaseFilters | Mapping[str, A
             "anticipa.care_gap_cases (id, resident_id, care_activity, status, priority, opened_at) is not available; "
             "wire planning/adapters.py to the care-gap schema"
         ) from exc
+    blocked = unreachable_residents(session)  # fails closed: no consent table, no plan
     return [
         PlannableCase(
             case_id=row.id,
@@ -87,6 +102,7 @@ def load_plannable_cases(session: Session, filters: CaseFilters | Mapping[str, A
             district_code=row.district_code or "",
             language=row.preferred_language or "unknown",
             opened_at=row.opened_at,
+            consent_denied=row.resident_id in blocked,
         )
         for row in rows
     ]

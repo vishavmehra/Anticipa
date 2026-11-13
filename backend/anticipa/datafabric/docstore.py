@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Document store for synthetic clinical documents (contract 17 §1, ADR-058/059).
 
 Key layout (identical for every backend): `<dataset_version>/<resident_id>/<document_id>.txt`, stored as the exact
@@ -81,6 +82,17 @@ class LocalDocumentStore:
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
 
+    def delete_many(self, keys: list[str]) -> int:
+        """Remove the given keys (absent ones are ignored); return how many existed."""
+        removed = 0
+        for key in keys:
+            try:
+                self._path(key).unlink()
+                removed += 1
+            except FileNotFoundError:
+                pass
+        return removed
+
 
 class SupabaseStorageDocumentStore:
     """Supabase Storage REST (`/storage/v1`), private bucket, service-role key."""
@@ -104,7 +116,9 @@ class SupabaseStorageDocumentStore:
     @staticmethod
     def _not_found(resp: httpx.Response) -> bool:
         # Storage answers a missing object with 404, or 400 + {"statusCode": "404"} depending on version.
-        return resp.status_code == 404 or (resp.status_code == 400 and "not_found" in resp.text.lower().replace(" ", "_"))
+        return resp.status_code == 404 or (
+            resp.status_code == 400 and "not_found" in resp.text.lower().replace(" ", "_")
+        )
 
     def ensure_bucket(self) -> None:
         resp = self._client.post(
@@ -141,9 +155,23 @@ class SupabaseStorageDocumentStore:
         resp.raise_for_status()
         return False
 
+    def delete_many(self, keys: list[str], batch: int = 100) -> int:
+        """Remove objects (Storage `DELETE /object/<bucket>` with a `prefixes` list); return how many existed."""
+        keys = [validate_key(k) for k in keys]
+        removed = 0
+        for i in range(0, len(keys), batch):
+            resp = self._client.request(
+                "DELETE", f"{self.base}/object/{self.bucket}", headers=self._headers, json={"prefixes": keys[i : i + batch]}
+            )
+            resp.raise_for_status()
+            removed += len(resp.json())
+        return removed
+
 
 class DocStoreSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8", extra="ignore", populate_by_name=True)
+    model_config = SettingsConfigDict(
+        env_file=ENV_FILE, env_file_encoding="utf-8", extra="ignore", populate_by_name=True
+    )
 
     backend: Literal["local", "supabase"] = Field("local", validation_alias="ANTICIPA_DOCUMENT_STORE")
     local_dir: Path = Field(DEFAULT_LOCAL_DIR, validation_alias="ANTICIPA_DOCUMENT_DIR")

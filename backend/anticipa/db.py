@@ -42,12 +42,27 @@ def sql_in(column: str, values: tuple[str, ...]) -> str:
     return f"{column} IN ({', '.join(repr(v) for v in values)})"
 
 
+# Owner decision (Supabase Data API = read-only for logged-in judges; migration 0005): synthetic domain
+# tables that the `observer` role may SELECT through the Data API. Everything else (audit_events,
+# user_profiles, model_invocations, processing_jobs/items, document_chunks, alembic_version, ...) is never
+# granted.
+JUDGE_READ_TABLES = (
+    "residents", "clinical_records", "family_edges", "documents", "evidence_facts", "evidence_sources",
+    "guidelines", "guideline_versions", "rule_versions", "eligibility_evaluations", "care_gap_cases",
+    "case_status_history", "clinics", "clinic_services", "capacity_slots", "planning_runs",
+    "planned_allocations", "unallocated_cases", "communication_templates", "communication_events",
+    "resident_responses", "appointments", "completion_evidence", "datasets",
+)  # fmt: skip
+JUDGE_VIEW_PREFIX = "judge_"  # public.judge_<table>: what PostgREST serves
+_JUDGE_TABLES_SQL = "ARRAY[" + ", ".join(f"'{t}'" for t in JUDGE_READ_TABLES) + "]"
+
 # ADR-058, idempotent: RLS on every table in the app schema (no policies => non-owner roles see nothing)
 # and no privileges for the Supabase Data-API roles. Run by migration 0001 and again by alembic/env.py after
-# every upgrade, so a table added by a later migration cannot be left exposed.
+# every upgrade, so a table added by a later migration cannot be left exposed. Where the judge_read policy is
+# installed (migration 0005) the judge SELECT grants are re-asserted, because the revokes above remove them.
 HARDEN_SQL = f"""
 DO $$
-DECLARE t record; r text;
+DECLARE t record; r text; tbl text;
 BEGIN
     FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = '{DB_SCHEMA}' LOOP
         EXECUTE format('ALTER TABLE {DB_SCHEMA}.%I ENABLE ROW LEVEL SECURITY', t.tablename);
@@ -65,8 +80,74 @@ BEGIN
                            r);
         END IF;
     END LOOP;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated')
+       AND EXISTS (SELECT 1 FROM pg_policies
+                   WHERE schemaname = '{DB_SCHEMA}' AND policyname = 'judge_read') THEN
+        EXECUTE 'GRANT USAGE ON SCHEMA {DB_SCHEMA} TO authenticated';
+        FOREACH tbl IN ARRAY {_JUDGE_TABLES_SQL} LOOP
+            IF to_regclass(format('{DB_SCHEMA}.%I', tbl)) IS NOT NULL THEN
+                EXECUTE format('GRANT SELECT ON {DB_SCHEMA}.%I TO authenticated', tbl);
+            END IF;
+        END LOOP;
+    END IF;
 END $$;
-"""  # noqa: S608  (DB_SCHEMA is a constant)
+"""  # noqa: S608  (DB_SCHEMA and the table list are constants)
+
+# Migration 0005: read-only Data-API access for logged-in judges, only where Supabase's roles and
+# `auth.jwt()` exist (a no-op on the local Docker Postgres). Per table: SELECT for `authenticated`, an RLS
+# policy that admits only `app_metadata.anticipa_role = 'observer'` (user_metadata is never trusted; a
+# self-registered user has no role and sees nothing), and a security_invoker view public.judge_<table> so
+# PostgREST serves it while the base table's RLS still applies. Nothing for `anon`; no INSERT/UPDATE/DELETE
+# for anyone. Idempotent.
+JUDGE_READ_SQL = f"""
+DO $$
+DECLARE tbl text;
+BEGIN
+    IF NOT (EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated')
+            AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon')
+            AND to_regprocedure('auth.jwt()') IS NOT NULL) THEN
+        RETURN;
+    END IF;
+    EXECUTE 'GRANT USAGE ON SCHEMA {DB_SCHEMA} TO authenticated';
+    FOREACH tbl IN ARRAY {_JUDGE_TABLES_SQL} LOOP
+        IF to_regclass(format('{DB_SCHEMA}.%I', tbl)) IS NULL THEN
+            CONTINUE;
+        END IF;
+        EXECUTE format('ALTER TABLE {DB_SCHEMA}.%I ENABLE ROW LEVEL SECURITY', tbl);
+        EXECUTE format('GRANT SELECT ON {DB_SCHEMA}.%I TO authenticated', tbl);
+        EXECUTE format('DROP POLICY IF EXISTS judge_read ON {DB_SCHEMA}.%I', tbl);
+        EXECUTE format(
+            $p$CREATE POLICY judge_read ON {DB_SCHEMA}.%I FOR SELECT TO authenticated
+               USING (((SELECT auth.jwt()) -> 'app_metadata' ->> 'anticipa_role') = 'observer')$p$, tbl);
+        EXECUTE format('DROP VIEW IF EXISTS public.%I', '{JUDGE_VIEW_PREFIX}' || tbl);
+        EXECUTE format('CREATE VIEW public.%I WITH (security_invoker = true) AS SELECT * FROM {DB_SCHEMA}.%I',
+                       '{JUDGE_VIEW_PREFIX}' || tbl, tbl);
+        EXECUTE format('REVOKE ALL ON public.%I FROM PUBLIC, anon, authenticated',
+                       '{JUDGE_VIEW_PREFIX}' || tbl);
+        EXECUTE format('GRANT SELECT ON public.%I TO authenticated', '{JUDGE_VIEW_PREFIX}' || tbl);
+    END LOOP;
+END $$;
+"""  # noqa: S608  (DB_SCHEMA, the view prefix and the table list are constants)
+
+# Reverse of JUDGE_READ_SQL (migration 0005 downgrade). Safe where the roles or policies do not exist.
+JUDGE_READ_REVOKE_SQL = f"""
+DO $$
+DECLARE tbl text;
+BEGIN
+    FOREACH tbl IN ARRAY {_JUDGE_TABLES_SQL} LOOP
+        EXECUTE format('DROP VIEW IF EXISTS public.%I', '{JUDGE_VIEW_PREFIX}' || tbl);
+        IF to_regclass(format('{DB_SCHEMA}.%I', tbl)) IS NOT NULL THEN
+            EXECUTE format('DROP POLICY IF EXISTS judge_read ON {DB_SCHEMA}.%I', tbl);
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+                EXECUTE format('REVOKE ALL ON {DB_SCHEMA}.%I FROM authenticated', tbl);
+            END IF;
+        END IF;
+    END LOOP;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+        EXECUTE 'REVOKE ALL ON SCHEMA {DB_SCHEMA} FROM authenticated';
+    END IF;
+END $$;
+"""  # noqa: S608  (constants only)
 
 
 def _on_connect(dbapi_connection, _record) -> None:

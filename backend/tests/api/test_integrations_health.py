@@ -47,7 +47,7 @@ def provider_stub(monkeypatch):
 
 def test_integrations_include_claude_and_nebius(api_client_nodb, auth_headers, provider_stub):
     calls, _ = provider_stub
-    resp = api_client_nodb.get("/api/v1/integrations", headers=auth_headers("observer"))
+    resp = api_client_nodb.get("/api/v1/integrations", headers=auth_headers("system_admin"))
     assert resp.status_code == 200
     by_key = {i["key"]: i for i in resp.json()["data"]}
     assert {"postgres", "hapi", "claude", "nebius"} <= set(by_key)
@@ -61,18 +61,19 @@ def test_provider_probe_is_cached_for_five_minutes(api_client_nodb, auth_headers
     calls, _ = provider_stub
     for _ in range(3):
         assert (
-            api_client_nodb.get("/api/v1/integrations", headers=auth_headers("observer")).status_code == 200
+            api_client_nodb.get("/api/v1/integrations", headers=auth_headers("system_admin")).status_code
+            == 200
         )
     assert (
         api_client_nodb.get(
-            "/api/v1/integrations/claude/health", headers=auth_headers("observer")
+            "/api/v1/integrations/claude/health", headers=auth_headers("system_admin")
         ).status_code
         == 200
     )
     assert calls["n"] == 1
     cached = integrations._provider_cache
     integrations._provider_cache = (time.monotonic() - integrations.PROVIDER_CACHE_TTL_SECONDS - 1, cached[1])
-    api_client_nodb.get("/api/v1/integrations", headers=auth_headers("observer"))
+    api_client_nodb.get("/api/v1/integrations", headers=auth_headers("system_admin"))
     assert calls["n"] == 2
 
 
@@ -89,11 +90,29 @@ def test_provider_status_mapping(api_client_nodb, auth_headers, provider_stub, p
     assert data["status"] == expected and len(data["detail"]) <= 300
 
 
+def test_integrations_are_internal_only_system_admin_may_read_them(
+    api_client_nodb, auth_headers, provider_stub
+):
+    for role in ("observer", "population_admin", "care_coordinator", "clinical_reviewer"):
+        assert api_client_nodb.get("/api/v1/integrations", headers=auth_headers(role)).status_code == 403, (
+            role
+        )
+        assert (
+            api_client_nodb.get("/api/v1/integrations/claude/health", headers=auth_headers(role)).status_code
+            == 403
+        ), role
+    assert (
+        api_client_nodb.get("/api/v1/integrations", headers=auth_headers("system_admin")).status_code == 200
+    )
+
+
 def test_unknown_integration_is_404_and_role_less_is_403(
     api_client_nodb, auth_headers, mint_token, provider_stub
 ):
     assert (
-        api_client_nodb.get("/api/v1/integrations/nope/health", headers=auth_headers("observer")).status_code
+        api_client_nodb.get(
+            "/api/v1/integrations/nope/health", headers=auth_headers("system_admin")
+        ).status_code
         == 404
     )
     headers = {"Authorization": f"Bearer {mint_token(None)}"}

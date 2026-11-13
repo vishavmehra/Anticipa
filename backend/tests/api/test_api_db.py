@@ -48,23 +48,28 @@ def _new_job(db_session):
     return job
 
 
-def test_observer_can_read_jobs_but_not_change_them(api_client, auth_headers, db_session):
+def test_observer_cannot_see_or_change_jobs(api_client, auth_headers, db_session):
     job = _new_job(db_session)
-    headers = auth_headers("observer")
-    listing = api_client.get("/api/v1/jobs", headers=headers)
-    assert listing.status_code == 200 and listing.json()["meta"]["total"] >= 1
-    detail = api_client.get(f"/api/v1/jobs/{job.id}", headers=headers).json()["data"]
-    assert detail["id"] == str(job.id) and detail["checkpoint"] is None  # checkpoint is for operators only
-    assert api_client.get(f"/api/v1/jobs/{job.id}/progress", headers=headers).status_code == 200
+    headers = auth_headers("observer")  # jobs are internal backend data: system_admin only
+    assert api_client.get("/api/v1/jobs", headers=headers).status_code == 403
+    assert api_client.get(f"/api/v1/jobs/{job.id}", headers=headers).status_code == 403
+    assert api_client.get(f"/api/v1/jobs/{job.id}/progress", headers=headers).status_code == 403
     for action in ("cancel", "retry"):
         assert api_client.post(f"/api/v1/jobs/{job.id}/{action}", headers=headers).status_code == 403
     db_session.expire_all()
     assert db_session.get(ProcessingJob, job.id).status == "queued"  # untouched
+    ops = auth_headers("system_admin")
+    listing = api_client.get("/api/v1/jobs", headers=ops)
+    assert listing.status_code == 200 and listing.json()["meta"]["total"] >= 1
+    detail = api_client.get(f"/api/v1/jobs/{job.id}", headers=ops).json()["data"]
+    assert detail["id"] == str(job.id) and detail["checkpoint"] is not None  # operators see the checkpoint
 
 
 def test_admin_cancel_is_audited_and_validated(api_client, auth_headers, db_session):
     job = _new_job(db_session)
-    headers = auth_headers("population_admin")
+    headers = auth_headers(
+        "population_admin"
+    )  # may cancel (processing.execute) but not browse jobs (jobs.view)
     resp = api_client.post(f"/api/v1/jobs/{job.id}/cancel", headers=headers)
     assert resp.status_code == 200 and resp.json()["data"]["status"] == "cancelled"
     events = api_client.get("/api/v1/audit", headers=headers, params={"action": "job.cancel"}).json()["data"]
@@ -76,9 +81,13 @@ def test_admin_cancel_is_audited_and_validated(api_client, auth_headers, db_sess
         api_client.post(f"/api/v1/jobs/{uuid.uuid4()}/cancel", headers=headers).json()["error"]["code"]
         == "NOT_FOUND"
     )
-    assert api_client.get("/api/v1/jobs/not-a-uuid", headers=headers).status_code == 422
-    assert api_client.get("/api/v1/jobs", headers=headers, params={"status": "bogus"}).status_code == 422
-    assert api_client.get("/api/v1/jobs", headers=headers, params={"page_size": 1000}).status_code == 422
+    assert (
+        api_client.get(f"/api/v1/jobs/{job.id}", headers=headers).status_code == 403
+    )  # browsing is operator only
+    ops = auth_headers("system_admin")
+    assert api_client.get("/api/v1/jobs/not-a-uuid", headers=ops).status_code == 422
+    assert api_client.get("/api/v1/jobs", headers=ops, params={"status": "bogus"}).status_code == 422
+    assert api_client.get("/api/v1/jobs", headers=ops, params={"page_size": 1000}).status_code == 422
 
 
 def test_audit_visibility_follows_role(api_client, auth_headers, db_session):
@@ -100,7 +109,7 @@ def test_audit_visibility_follows_role(api_client, auth_headers, db_session):
         } if resp.status_code == 200 else set()
 
     assert actions("population_admin") == (200, {"demo.other", "demo.mine"})
-    assert actions("observer") == (200, {"demo.other", "demo.mine"})  # observer sees everything, redacted
+    assert actions("observer") == (403, set())  # the audit trail is internal: not for judges
     assert actions("care_coordinator") == (200, {"demo.mine"})  # scoped to own events
     assert actions("clinical_reviewer")[1] == set()
     assert (
@@ -123,7 +132,7 @@ def test_claimed_job_progress_endpoint_reports_counters(api_client, auth_headers
     assert data["percent_complete"] == 25.0 and data["status"] == "queued"
 
 
-def test_observer_audit_view_is_redacted(api_client, auth_headers, db_session):
+def test_audit_trail_is_closed_to_observers_and_unredacted_for_admins(api_client, auth_headers, db_session):
     actor = uuid.uuid4()
     audit.record(
         db_session, Actor(actor, "system_admin"), "demo.redact", "thing", "r1", details={"note": "free text"},
@@ -138,9 +147,4 @@ def test_observer_audit_view_is_redacted(api_client, auth_headers, db_session):
         (str(actor), "req-123", {"note": "free text"})
     ]
     seen = api_client.get("/api/v1/audit", headers=auth_headers("observer"), params=params)
-    assert seen.status_code == 200
-    (event,) = seen.json()["data"]
-    assert event["action"] == "demo.redact" and event["resource_id"] == "r1"
-    assert event["actor_role"] == "system_admin"  # the kind of actor stays visible...
-    assert event["actor_id"] is None and event["request_id"] is None and event["details"] == {}
-    assert str(actor) not in seen.text and "free text" not in seen.text and "req-123" not in seen.text
+    assert seen.status_code == 403 and "free text" not in seen.text and str(actor) not in seen.text

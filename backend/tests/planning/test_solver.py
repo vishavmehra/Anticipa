@@ -96,6 +96,7 @@ def test_hard_constraint_registry_is_complete_and_every_check_can_fail(f):
     s_ov = f.slot(p, 13, 5)
     s_ov2 = f.slot(f.pool("a2", "D01", "svc_a"), 13, 5)  # same time, another clinic
     c1, c2, c3 = f.case(1, "svc_a", "D01"), f.case(2, "svc_a", "D01"), f.case(3, "svc_a", "D01", resident=1)
+    c4 = f.case(4, "svc_a", "D01", consent_denied=True)
     cfg = f.config(max_travel_tier=1)
     pools = [p, q, far, f.pool("a2", "D01", "svc_a"), *anchors]
     slots = [s1, s_wrong, s_far, s_closed, s_short, s_out, s_ov, s_ov2]
@@ -110,10 +111,11 @@ def test_hard_constraint_registry_is_complete_and_every_check_can_fail(f):
         "planning_horizon": [Allocation(c1.case_id, s_out.slot_id)],
         "travel_eligibility": [Allocation(c1.case_id, s_far.slot_id)],
         "resident_time_conflict": [Allocation(c1.case_id, s_ov.slot_id), Allocation(c3.case_id, s_ov2.slot_id)],
+        "consent_respected": [Allocation(c4.case_id, s1.slot_id)],
     }
     assert set(bad) == set(HARD_CONSTRAINTS) and all(callable(c) for c in HARD_CONSTRAINTS.values())
     for name, allocs in bad.items():
-        names = {v.constraint for v in validate_plan(allocs, [c1, c2, c3], pools, slots, cfg)}
+        names = {v.constraint for v in validate_plan(allocs, [c1, c2, c3, c4], pools, slots, cfg)}
         assert name in names, f"{name} validator did not fire"
 
 
@@ -239,3 +241,15 @@ def test_10k_cases_smoke(f):
     assert len(res.allocations) + len(res.unallocated) == len(cases)
     by_reason = Counter(u.reason_code for u in res.unallocated)
     assert set(by_reason) <= set(REASON_CODES)
+
+
+def test_a_resident_who_opted_out_is_never_planned_and_is_explained(f):
+    p = f.pool("c1", "D01", "svc_a")
+    cases = [f.case(i, "svc_a", "D01") for i in range(4)] + [f.case(10, "svc_a", "D01", "urgent", consent_denied=True)]
+    res = plan(cases, [p], [f.slot(p, 9, 10)], f.config())  # plenty of seats: the urgent opted-out case still gets none
+    denied = next(u for u in res.unallocated if u.case_id == cases[-1].case_id)
+    assert denied.reason_code == "consent_denied" and "opted out" in denied.explanation
+    assert cases[-1].case_id not in {a.case_id for a in res.allocations} and len(res.allocations) == 4
+    assert res.metrics["reason_counts"] == {"consent_denied": 1} and not validate_plan(res.allocations, cases, [p], [f.slot(p, 9, 10)], f.config())
+    without = plan(cases[:4], [p], [f.slot(p, 9, 10)], f.config())  # the plan for everyone else is unchanged
+    assert {a.case_id for a in without.allocations} == {a.case_id for a in res.allocations}

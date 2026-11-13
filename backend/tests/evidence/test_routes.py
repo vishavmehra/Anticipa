@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
+from anticipa.ai.settings import AiSettings
 from anticipa.ai.testing import FakeAdapter, err, make_test_router, ok
 from anticipa.ai.types import AdapterResponse, Usage
 from anticipa.api.errors import install_exception_handlers
@@ -20,6 +21,8 @@ from anticipa.core.auth import CurrentUser, get_current_user
 from anticipa.core.models import AuditEvent
 from anticipa.datafabric.models import DocumentChunk
 from anticipa.evidence import DocumentMeta, extract_document, service
+from anticipa.evidence import routes as routes_mod
+from anticipa.evidence.cohort import save_manifest, select_cohort
 from anticipa.evidence.models import EvidenceFact, EvidenceSource
 from anticipa.evidence.routes import router as evidence_router
 
@@ -81,21 +84,38 @@ def api(sessions, monkeypatch):
 
 
 class Store:
+    """In-memory document store (documents and cohort manifests)."""
+
     def __init__(self, texts):
         self.texts = texts
 
     def read_text(self, key):
+        if key not in self.texts:
+            raise FileNotFoundError(key)  # the DocumentStore contract
         return self.texts[key]
+
+    def write_text(self, key, text_):
+        self.texts[key] = text_
+        return key
+
+    def exists(self, key):
+        return key in self.texts
+
+
+def settings(**kw) -> AiSettings:
+    return AiSettings(_env_file=None, **kw)
 
 
 @pytest.fixture
 def seeded(world, sessions, monkeypatch):
-    """One resident, one document, three extracted facts (accepted / rejected / requires_review)."""
-    rid = world.resident()
+    """One resident, one document, three extracted facts (accepted / rejected / requires_review), a cohort."""
+    rid = world.resident(preferred_language="en")
     did = world.document(rid, TEXT)
     key = f"{world.tag}/{did}.txt"
-    monkeypatch.setattr(service, "get_store", lambda: Store({key: TEXT}))
-    router, _, _ = make_test_router({"nebius": FakeAdapter(ok(REPLY))})
+    store = Store({key: TEXT})
+    monkeypatch.setattr(service, "get_store", lambda: store)
+    monkeypatch.setattr(routes_mod, "get_ai_settings", lambda: settings())  # default policy: Nebius off
+    router, _, _ = make_test_router({"anthropic": FakeAdapter(ok(REPLY))})
     outcome = asyncio.run(extract_document(router, TEXT, DocumentMeta(document_id=str(did))))
     doc = service.DocRow(did, rid, "clinical_note", "en", key, "h", None, "synthetic")
     with sessions() as s:
@@ -105,7 +125,11 @@ def seeded(world, sessions, monkeypatch):
             f.fact_type: f.id
             for f in s.execute(select(EvidenceFact).where(EvidenceFact.resident_id == rid)).scalars()
         }
-    return {"resident": rid, "document": did, "facts": facts, "key": key}
+        manifest = select_cohort(s, seed=1, size=10, dataset_version=f"test-{world.tag}")
+    save_manifest(store, manifest)
+    return {
+        "resident": rid, "document": did, "facts": facts, "key": key, "store": store, "cohort": manifest.cohort_id,
+    }  # fmt: skip
 
 
 # ----------------------------------------------------------------------------------------------- reads
@@ -123,7 +147,7 @@ def test_review_queue_lists_only_requires_review_with_sources_and_pagination(api
     src = fact["sources"][0]
     assert TEXT[src["start_offset"] : src["end_offset"]] == src["quote"] == "Colonoscopy advised next year."
     assert src["verification_status"] == "verified_exact" and src["document_id"] == str(seeded["document"])
-    assert fact["synthetic_status"] == "synthetic" and fact["model_provider"] == "nebius"
+    assert fact["synthetic_status"] == "synthetic" and fact["model_provider"] == "anthropic"
 
     page = api.get(
         "/api/v1/evidence", params={"resident_id": str(seeded["resident"]), "page_size": 2, "page": 2}
@@ -266,48 +290,209 @@ def test_observer_reads_everything_but_triggers_nothing(api, seeded):
     for path in ("/api/v1/evidence/extraction-jobs", "/api/v1/evidence/embedding-jobs"):
         assert api.post(path, json={"limit": 1}).status_code == 403
     assert (
-        api.get("/api/v1/evidence/search", params={"q": "breast"}).status_code == 403
-    )  # search calls a paid provider
+        api.get("/api/v1/evidence/search", params={"q": "breast"}).status_code == 200
+    )  # full text: no provider
+    assert api.get("/api/v1/evidence/search", params={"q": "breast", "mode": "semantic"}).status_code == 409
     api.as_role("care_coordinator")  # no evidence.view at all
     assert api.get("/api/v1/evidence").status_code == 403
 
 
 # ------------------------------------------------------------------------------------------------- jobs
-def test_extraction_job_submission_validation_and_idempotency(api, seeded, world):
+def test_extraction_job_needs_a_cohort_and_is_validated_estimated_and_idempotent(api, seeded, world):
     api.as_role("population_admin")
-    body = {"resident_ids": [str(seeded["resident"])], "idempotency_key": f"k-{world.tag}", "route": "auto"}
+    body = {
+        "cohort_id": seeded["cohort"],
+        "resident_ids": [str(seeded["resident"])],
+        "idempotency_key": f"k-{world.tag}",
+    }
     r = api.post("/api/v1/evidence/extraction-jobs", json=body)
     assert r.status_code == 202
     first = r.json()["data"]
     world.jobs.append(uuid.UUID(first["job_id"]))
     assert first["job_type"] == "evidence.extract_batch" and first["created"] and first["document_count"] == 1
+    est = first["estimate"]
+    assert est["documents"] == 1 and est["max_escalations"] == 0  # 10% of a 1-document cohort is 0
+    assert Decimal(est["expected_total_usd"]) == Decimal("0.0004") and est["within_run_budget"] is True
     again = api.post("/api/v1/evidence/extraction-jobs", json=body)
-    assert (
-        again.status_code == 200
-        and again.json()["data"]["job_id"] == first["job_id"]
-        and not again.json()["data"]["created"]
-    )
-    assert (
-        api.post("/api/v1/evidence/extraction-jobs", json={}).status_code == 422
-    )  # no selection: never "everything"
-    assert api.post("/api/v1/evidence/extraction-jobs", json={"limit": 5, "surprise": 1}).status_code == 422
-    assert api.post("/api/v1/evidence/extraction-jobs", json={"limit": 0}).status_code == 422
-    assert (
-        api.post("/api/v1/evidence/extraction-jobs", json={"limit": 10, "concurrency": 99}).status_code == 422
-    )
+    assert again.status_code == 200 and again.json()["data"]["job_id"] == first["job_id"]
+    for bad in (
+        {},
+        {"limit": 5},
+        {"limit": 5, "cohort_id": "no-such-cohort-x"},
+        {"limit": 0},
+        {"cohort_id": seeded["cohort"], "surprise": 1},
+        {"cohort_id": seeded["cohort"], "concurrency": 99},
+    ):
+        assert api.post("/api/v1/evidence/extraction-jobs", json=bad).status_code in (404, 422), bad
+    dry = api.post("/api/v1/evidence/extraction-jobs", json={"cohort_id": seeded["cohort"], "dry_run": True})
+    assert dry.status_code == 200 and dry.json()["data"]["dry_run"] and dry.json()["data"]["job_id"] is None
 
 
-def test_embedding_job_submission(api, seeded, world):
+def test_scope_beyond_the_cohort_is_refused_unless_an_audited_override_is_given(api, seeded, world, sessions):
+    api.as_role("population_admin")
+    other = world.resident(preferred_language="hi")  # created after the cohort manifest: not a member
+    other_doc = world.document(other, "Another resident's note.")
+    outside = {"cohort_id": seeded["cohort"], "document_ids": [str(other_doc)]}
+    r = api.post("/api/v1/evidence/extraction-jobs", json=outside)
+    assert r.status_code == 422 and "outside AI cohort" in r.json()["error"]["message"]
+    assert (
+        api.post(
+            "/api/v1/evidence/extraction-jobs",
+            json={"cohort_id": seeded["cohort"], "resident_ids": [str(other)]},
+        ).status_code
+        == 422
+    )
+    over = api.post(
+        "/api/v1/evidence/extraction-jobs", json={"override_cohort": True, "document_ids": [str(other_doc)]}
+    )
+    assert over.status_code == 202 and over.json()["data"]["override_cohort"] is True
+    world.jobs.append(uuid.UUID(over.json()["data"]["job_id"]))
+    with sessions() as s:
+        actions = {
+            e.action: e.details
+            for e in s.execute(
+                select(AuditEvent).where(AuditEvent.resource_id == over.json()["data"]["job_id"])
+            ).scalars()
+        }
+    assert actions["evidence.cohort.override"]["documents"] == 1
+    assert actions["evidence.extraction.submit"]["override_cohort"] is True
+
+
+def test_a_run_whose_expected_cost_exceeds_the_run_budget_is_refused(api, seeded, monkeypatch):
+    api.as_role("population_admin")
+    monkeypatch.setattr(routes_mod, "get_ai_settings", lambda: settings(anticipa_ai_run_budget_usd="0.0001"))
+    r = api.post(
+        "/api/v1/evidence/extraction-jobs",
+        json={"cohort_id": seeded["cohort"], "resident_ids": [str(seeded["resident"])]},
+    )
+    assert r.status_code == 409 and "per-run budget" in r.json()["error"]["message"]
+
+
+def test_embeddings_are_disabled_by_default_and_need_an_approved_cost_when_enabled(
+    api, seeded, world, monkeypatch
+):
     api.as_role("system_admin")
-    r = api.post("/api/v1/evidence/embedding-jobs", json={"document_ids": [str(seeded["document"])]})
-    assert r.status_code == 202
-    world.jobs.append(uuid.UUID(r.json()["data"]["job_id"]))
-    assert (
-        r.json()["data"]["job_type"] == "evidence.embed_documents" and r.json()["data"]["document_count"] == 1
+    body = {"cohort_id": seeded["cohort"]}
+    off = api.post("/api/v1/evidence/embedding-jobs", json=body)
+    assert off.status_code == 409 and "disabled" in off.json()["error"]["message"]  # default: Nebius off
+
+    monkeypatch.setattr(routes_mod, "get_ai_settings", lambda: settings(anticipa_enable_nebius=True))
+    dry = api.post("/api/v1/evidence/embedding-jobs", json={**body, "dry_run": True}).json()["data"]
+    est = dry["estimate"]
+    assert dry["dry_run"] and est["unique_texts_to_embed"] == 1 and est["estimated_tokens"] > 0
+    assert est["provider"] == "nebius" and est["documents"] == 1 and Decimal(est["estimated_cost_usd"]) > 0
+    refused = api.post("/api/v1/evidence/embedding-jobs", json=body)  # no approval flag: refuses to start
+    assert refused.status_code == 409 and "approval required" in refused.json()["error"]["message"]
+    low = api.post("/api/v1/evidence/embedding-jobs", json={**body, "approve_cost_usd": "0.000000"})
+    assert low.status_code == 409
+    approved = api.post("/api/v1/evidence/embedding-jobs", json={**body, "approve_cost_usd": "0.01"})
+    assert approved.status_code == 202 and approved.json()["data"]["job_type"] == "evidence.embed_documents"
+    world.jobs.append(uuid.UUID(approved.json()["data"]["job_id"]))
+    monkeypatch.setattr(
+        routes_mod,
+        "get_ai_settings",
+        lambda: settings(anticipa_enable_nebius=True, anticipa_nebius_run_approved_usd="0.01"),
     )
+    env_ok = api.post("/api/v1/evidence/embedding-jobs", json=body)  # the env approval works too
+    assert env_ok.status_code == 202
+    world.jobs.append(uuid.UUID(env_ok.json()["data"]["job_id"]))
+
+
+# --------------------------------------------------------------------------------------------- cohorts
+def test_cohort_creation_is_deterministic_idempotent_audited_and_capped(api, seeded, world, sessions):
+    api.as_role("population_admin")
+    body = {"seed": 7, "size": 5, "dataset_version": f"test-{world.tag}", "cohort_id": f"c-{world.tag}"}
+    r = api.post("/api/v1/evidence/cohorts", json=body)
+    assert r.status_code == 201
+    m = r.json()["data"]
+    assert (
+        m["size"] == 1 and m["cohort_id"] == body["cohort_id"] and "resident_ids" not in m
+    )  # one eligible resident
+    assert m["distributions"]["language"] == {"en": 1} and m["strata"] == 1
+    again = api.post("/api/v1/evidence/cohorts", json=body)
+    assert (
+        again.status_code == 200 and again.json()["data"]["resident_ids_sha256"] == m["resident_ids_sha256"]
+    )
+    got = api.get(f"/api/v1/evidence/cohorts/{body['cohort_id']}")
+    assert got.status_code == 200 and got.json()["data"]["seed"] == 7
+    assert api.get("/api/v1/evidence/cohorts/missing-cohort").status_code == 404
+    assert (
+        api.post("/api/v1/evidence/cohorts", json={"seed": 1, "size": 10_001}).status_code == 422
+    )  # fixed at 10k
+    world.residents.append(world.resident(preferred_language="ar"))
+    world.document(world.residents[-1], "A new resident arrives.")
+    changed = api.post("/api/v1/evidence/cohorts", json={**body, "size": 5})
+    assert changed.status_code == 409  # a registered cohort is never silently replaced
+    with sessions() as s:
+        assert s.execute(
+            select(AuditEvent).where(
+                AuditEvent.action == "evidence.cohort.create", AuditEvent.resource_id == body["cohort_id"]
+            )
+        ).scalar_one()
+    api.as_role("observer")
+    assert api.post("/api/v1/evidence/cohorts", json=body).status_code == 403
+    assert api.get(f"/api/v1/evidence/cohorts/{body['cohort_id']}").status_code == 200
 
 
 # ----------------------------------------------------------------------------------------------- search
+HI = "माँ को 45 वर्ष की आयु में स्तन कैंसर का निदान हुआ था। मरीज़ को मधुमेह नहीं है।"
+AR = "تم تشخيص الأم بسرطان الثدي في سن 45. لا يوجد داء السكري لدى المريضة."
+
+
+def test_default_search_is_full_text_with_offsets_for_english_hindi_and_arabic(api, seeded, world):
+    rid, store = seeded["resident"], seeded["store"]
+    for lang, text_ in (("hi", HI), ("ar", AR)):
+        did = world.document(rid, text_, language=lang)
+        store.texts[f"{world.tag}/{did}.txt"] = text_
+    api.as_role("observer")  # full text calls no provider, so every *.view role may use it
+    r = api.get("/api/v1/evidence/search", params={"q": "breast cancer", "resident_id": str(rid)})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert (
+        data["mode"] == "fulltext" and data["retrieval_only"] is True and "never establish" in data["notice"]
+    )
+    assert (
+        data["match"] == "all_terms"
+        and data["semantic_available"] is False
+        and data["scanned_documents"] == 3
+    )
+    hit = data["hits"][0]
+    assert (
+        hit["chunk_id"] is None
+        and hit["text"] == TEXT[hit["start_offset"] : hit["end_offset"]]
+        and "breast" in hit["text"]
+    )
+    assert hit["resident_id"] == str(rid) and hit["synthetic_status"] == "synthetic" and hit["score"] > 0
+
+    for query, needle, doc_lang in (("स्तन कैंसर", "स्तन", "hi"), ("سرطان الثدي", "الثدي", "ar")):
+        hits = api.get("/api/v1/evidence/search", params={"q": query, "resident_id": str(rid)}).json()[
+            "data"
+        ]["hits"]
+        assert hits and hits[0]["language"] == doc_lang and needle in hits[0]["text"], query
+    # no chunk has every term: terms are OR-ed with the same PostgreSQL tokeniser
+    anyt = api.get(
+        "/api/v1/evidence/search", params={"q": "mammogram colonoscopy", "resident_id": str(rid)}
+    ).json()["data"]
+    assert anyt["match"] == "any_term" and "Colonoscopy" in anyt["hits"][0]["text"]
+    nothing = api.get("/api/v1/evidence/search", params={"q": "zzzqqq", "resident_id": str(rid)}).json()[
+        "data"
+    ]
+    assert nothing["hits"] == [] and nothing["match"] is None
+    assert api.get("/api/v1/evidence/search", params={"q": "x"}).status_code == 422  # too short
+    assert (
+        api.get("/api/v1/evidence/search", params={"q": "breast", "resident_id": str(uuid.uuid4())}).json()[
+            "data"
+        ]["hits"]
+        == []
+    )
+
+
+def test_unscoped_full_text_search_is_capped_and_says_so(api, seeded, monkeypatch):
+    monkeypatch.setattr(routes_mod, "FTS_SCAN_DOCUMENTS", 0)
+    data = api.get("/api/v1/evidence/search", params={"q": "breast"}).json()["data"]
+    assert data["truncated"] is True and data["scanned_documents"] == 0
+
+
 class EmbedAdapter(FakeAdapter):
     async def embed(self, model, texts, dimensions):
         out = []
@@ -320,12 +505,14 @@ class EmbedAdapter(FakeAdapter):
         return out, Usage(input_tokens=5)
 
 
-def test_search_is_cosine_ranked_scoped_labelled_and_budget_guarded(api, seeded, sessions):
-    def vec(x0, x1):
-        v = [0.0] * 1024
-        v[0], v[1], v[1023] = x0, x1, 0.1
-        return v
+def vec(x0, x1):
+    v = [0.0] * 1024
+    v[0], v[1], v[1023] = x0, x1, 0.1
+    return v
 
+
+@pytest.fixture
+def embedded(seeded, sessions, monkeypatch):
     a, b = TEXT.index("Mother"), TEXT.index("Colonoscopy")
     with sessions() as s:
         s.add_all([
@@ -335,34 +522,40 @@ def test_search_is_cosine_ranked_scoped_labelled_and_budget_guarded(api, seeded,
                           embedding=vec(0, 1), embedding_model="m"),
         ])  # fmt: skip
         s.commit()
+    return {**seeded, "a": a, "b": b}
+
+
+def test_semantic_search_is_opt_in_ranked_scoped_and_budget_guarded(api, embedded, monkeypatch):
+    rid, a, b = embedded["resident"], embedded["a"], embedded["b"]
     router, sink, _ = make_test_router({"nebius": EmbedAdapter()})
     api.state.ai_router = router
+    # Nebius disabled (default): embeddings exist but are never used; the app works through full text
+    off = api.get(
+        "/api/v1/evidence/search", params={"q": "breast cancer family", "resident_id": str(rid)}
+    ).json()["data"]
+    assert off["mode"] == "fulltext" and off["semantic_available"] is False and sink.records == []
+    assert api.get("/api/v1/evidence/search", params={"q": "breast", "mode": "semantic"}).status_code == 409
 
-    r = api.get(
-        "/api/v1/evidence/search",
-        params={"q": "breast cancer family", "resident_id": str(seeded["resident"])},
-    )
-    assert r.status_code == 200
+    monkeypatch.setattr(routes_mod, "get_ai_settings", lambda: settings(anticipa_enable_nebius=True))
+    r = api.get("/api/v1/evidence/search", params={"q": "breast cancer family", "resident_id": str(rid)})
     data = r.json()["data"]
     assert (
-        data["retrieval_only"] is True
-        and "never establish" in data["notice"]
-        and data["query_model"].startswith("Qwen")
+        data["mode"] == "semantic" and data["semantic_available"] and data["query_model"].startswith("Qwen")
     )
     hits = data["hits"]
     assert [h["chunk_index"] for h in hits] == [0, 1] and hits[0]["score"] > hits[1]["score"]
-    assert hits[0]["text"] == TEXT[a : b - 1] and hits[0]["synthetic_status"] == "synthetic"
-    assert (hits[0]["start_offset"], hits[0]["end_offset"]) == (a, b - 1) and hits[0]["resident_id"] == str(
-        seeded["resident"]
-    )
     assert (
-        api.get("/api/v1/evidence/search", params={"q": "breast", "resident_id": str(uuid.uuid4())}).json()[
-            "data"
-        ]["hits"]
-        == []
+        hits[0]["text"] == TEXT[a : b - 1]
+        and hits[0]["chunk_id"]
+        and hits[0]["synthetic_status"] == "synthetic"
     )
-    assert api.get("/api/v1/evidence/search", params={"q": "x"}).status_code == 422  # too short
-    assert len(sink.records) == 2 and all(rec.task == "embedding.document" for rec in sink.records)
+    assert len(sink.records) == 1 and sink.records[0].task == "embedding.document"
+    forced_ft = api.get(
+        "/api/v1/evidence/search", params={"q": "breast", "mode": "fulltext", "resident_id": str(rid)}
+    ).json()["data"]
+    assert (
+        forced_ft["mode"] == "fulltext" and forced_ft["semantic_available"] is True and len(sink.records) == 1
+    )
 
     api.state.ai_router = make_test_router(
         {"nebius": EmbedAdapter()}, daily_budget_usd=Decimal("0.0000000001")
@@ -374,17 +567,22 @@ def test_search_is_cosine_ranked_scoped_labelled_and_budget_guarded(api, seeded,
     assert api.get("/api/v1/evidence/search", params={"q": "breast"}).status_code == 503
 
 
-def test_search_requires_a_role_that_may_trigger_ai(api, seeded):
+def test_semantic_search_requires_a_role_that_may_trigger_ai(api, embedded, monkeypatch):
+    monkeypatch.setattr(routes_mod, "get_ai_settings", lambda: settings(anticipa_enable_nebius=True))
     api.state.ai_router = make_test_router({"nebius": EmbedAdapter()})[0]
-    for role, status in (
-        ("clinical_reviewer", 200),
-        ("population_admin", 200),
-        ("system_admin", 403),
-        ("observer", 403),
+    for role, mode, status, used in (
+        ("clinical_reviewer", "semantic", 200, "semantic"),
+        ("population_admin", "auto", 200, "semantic"),
+        ("observer", "auto", 200, "fulltext"),  # auto quietly stays on full text for a read-only role
+        ("observer", "semantic", 403, None),
+        ("system_admin", "auto", 200, "semantic"),  # holds every product view since the 2026-11-13 role change, and may trigger AI
     ):
         api.as_role(role)
-        assert api.get("/api/v1/evidence/search", params={"q": "breast"}).status_code == status, role
+        r = api.get("/api/v1/evidence/search", params={"q": "breast", "mode": mode})
+        assert r.status_code == status, (role, mode)
+        if used:
+            assert r.json()["data"]["mode"] == used, (role, mode)
 
 
 def test_unused_imports_guard():
-    assert AdapterResponse and ok
+    assert AdapterResponse and ok and update and err

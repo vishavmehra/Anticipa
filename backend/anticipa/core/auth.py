@@ -80,6 +80,12 @@ def _display_name(claims: dict[str, Any], email: str | None) -> str | None:
     return email.split("@")[0][:100] if email else None
 
 
+def _is_google(app_metadata: dict[str, Any]) -> bool:
+    """app_metadata.provider/providers are set by Supabase Auth itself (not user-writable)."""
+    providers = app_metadata.get("providers")
+    return app_metadata.get("provider") == "google" or (isinstance(providers, list) and "google" in providers)
+
+
 def authenticate_token(token: str, settings: Settings) -> CurrentUser:
     """Verify a Supabase access token and return the user. Raises Unauthenticated / Forbidden /
     ProviderUnavailable."""
@@ -107,7 +113,10 @@ def authenticate_token(token: str, settings: Settings) -> CurrentUser:
         raise Unauthenticated("Invalid or expired token.") from exc
 
     app_metadata = claims.get("app_metadata")
-    role = app_metadata.get(ROLE_CLAIM) if isinstance(app_metadata, dict) else None
+    app_metadata = app_metadata if isinstance(app_metadata, dict) else {}
+    role = app_metadata.get(ROLE_CLAIM)
+    if role is None and settings.google_default_role and _is_google(app_metadata):
+        role = settings.google_default_role  # owner decision 2026-11-12: Google sign-in = read-only observer
     if role not in ROLES:  # missing, wrong type or unknown value; user_metadata is deliberately ignored
         raise Forbidden("No Anticipa role assigned")
     email = claims.get("email") if isinstance(claims.get("email"), str) else None

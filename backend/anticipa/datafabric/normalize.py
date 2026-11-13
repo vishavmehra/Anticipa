@@ -12,12 +12,14 @@ MedicationRequest, Encounter (summary fields) and DocumentReference (metadata on
 kept in full. CLI (no database needed):
     uv run --directory backend python -m anticipa.datafabric.normalize --dataset-version V [--batch 0]
 """
+# ruff: noqa: E501
 
 from __future__ import annotations
 
 import argparse
 import gzip
 import json
+import re
 import time
 import uuid
 from collections import Counter
@@ -31,6 +33,7 @@ import psutil
 
 from anticipa.core.ids import resident_uuid
 from anticipa.datafabric.assign import assign_district, assign_language
+from anticipa.datafabric.profiles import FULL, RULES, RuleCodes, load_rule_codes, marked_source_version
 from anticipa.datafabric.synthea import SYNTHEA_DIR, load_manifest, sorted_batches, source_system
 
 LOINC = "http://loinc.org"
@@ -100,17 +103,47 @@ DIAGNOSTIC_REPORT_ALLOW: dict[str, str] = {  # LOINC
 }
 
 RESIDENT_COLUMNS = (
-    "id", "source_system", "source_patient_id", "birth_date", "deceased_date", "administrative_sex",
-    "preferred_language", "district_code", "source_version",
+    "id",
+    "source_system",
+    "source_patient_id",
+    "birth_date",
+    "deceased_date",
+    "administrative_sex",
+    "preferred_language",
+    "district_code",
+    "source_version",
 )
 CLINICAL_COLUMNS = (
-    "resident_id", "resource_type", "source_resource_id", "source_system", "category", "code_system", "code", "display",
-    "effective_start", "effective_end", "status", "value_json", "source_reference",
+    "resident_id",
+    "resource_type",
+    "source_resource_id",
+    "source_system",
+    "category",
+    "code_system",
+    "code",
+    "display",
+    "effective_start",
+    "effective_end",
+    "status",
+    "value_json",
+    "source_reference",
 )
 CLINICAL_TYPES = (
-    "Condition", "Procedure", "Observation", "Immunization", "MedicationRequest", "DiagnosticReport", "Encounter",
-    "DocumentReference",
+    "Condition",
+    "Procedure",
+    "Observation",
+    "Immunization",
+    "MedicationRequest",
+    "DiagnosticReport",
+    "Encounter",
 )
+# Synthea's DocumentReference rows are metadata stubs of template notes (the note body is dropped): ~18% of all rows and
+# no consumer (Anticipa's documents come from the document generator). Excluded by default; opt in with ALL_TYPES.
+OPTIONAL_TYPES = ("DocumentReference",)
+ALL_TYPES = CLINICAL_TYPES + OPTIONAL_TYPES
+# `rules` profile: only these resource types are read; Immunization, MedicationRequest and DocumentReference are skipped.
+RULES_TYPES = ("Condition", "Procedure", "Observation", "DiagnosticReport", "Encounter")
+_PREFILTER_TYPES = ("Condition", "Procedure", "Observation", "DiagnosticReport")
 _SEX = {"male", "female", "other", "unknown"}
 
 
@@ -122,7 +155,9 @@ class NormStats:
     quarantined: Counter = field(default_factory=Counter)  # reason -> n
 
     def to_dict(self) -> dict:
-        return {k: dict(sorted(getattr(self, k).items())) for k in ("read", "emitted", "skipped", "quarantined")}
+        return {
+            k: dict(sorted(getattr(self, k).items())) for k in ("read", "emitted", "skipped", "quarantined")
+        }
 
 
 class Quarantine:
@@ -133,14 +168,25 @@ class Quarantine:
         if path.exists():
             path.unlink()  # a rerun regenerates it
 
-    def add(self, reason: str, rtype: str, rid: str | None, source_file: str, line_no: int, raw: bytes) -> None:
+    def add(
+        self, reason: str, rtype: str, rid: str | None, source_file: str, line_no: int, raw: bytes
+    ) -> None:
         self.stats.quarantined[reason] += 1
         if self._fh is None:
             self._fh = open(self.path, "wb")  # noqa: SIM115 - closed in close()
-        self._fh.write(orjson.dumps({
-            "reason": reason, "resource_type": rtype, "id": rid, "file": source_file, "line": line_no,
-            "raw": raw[:1000].decode("utf-8", "replace"),
-        }) + b"\n")
+        self._fh.write(
+            orjson.dumps(
+                {
+                    "reason": reason,
+                    "resource_type": rtype,
+                    "id": rid,
+                    "file": source_file,
+                    "line": line_no,
+                    "raw": raw[:1000].decode("utf-8", "replace"),
+                }
+            )
+            + b"\n"
+        )
 
     def close(self) -> None:
         if self._fh:
@@ -199,8 +245,11 @@ def _obs_value(r: dict, tag: str) -> str:
                 break
     if comps := r.get("component"):
         d["components"] = [
-            {"code": _cc(c.get("code"))[1], "value": (c.get("valueQuantity") or {}).get("value"),
-             "unit": (c.get("valueQuantity") or {}).get("unit")}
+            {
+                "code": _cc(c.get("code"))[1],
+                "value": (c.get("valueQuantity") or {}).get("value"),
+                "unit": (c.get("valueQuantity") or {}).get("unit"),
+            }
             for c in comps
         ]
     return _dumps(d)
@@ -211,37 +260,54 @@ def _obs_value(r: dict, tag: str) -> str:
 Mapped = tuple | str | None
 
 
-def _map_condition(r: dict) -> Mapped:
+def _tag(allow: dict[str, str], system_uri: str, s, c, rule_codes: frozenset, rules_only: bool) -> str | None:
+    """Value tag if the code is loaded. A code referenced by a guideline selector is always loaded; otherwise only the
+    allow-list qualifies, and not at all in the rules profile."""
+    allowed = allow.get(c) if s == system_uri else None
+    if (s, c) in rule_codes:
+        return allowed or "rule_code"
+    return None if rules_only else allowed
+
+
+def _map_condition(r: dict, *, rule_codes: frozenset = frozenset(), rules_only: bool = False) -> Mapped:
     s, c, d = _cc(r.get("code"))
     if not c:
         return "missing_code"
+    if rules_only and (s, c) not in rule_codes:
+        return None
     start = _ts(r.get("onsetDateTime") or r.get("recordedDate"))
     if not start:
         return "missing_date"
     status = _cc(r.get("clinicalStatus"))[1]
-    value = _dumps({"verification_status": _cc(r.get("verificationStatus"))[1],
-                    "category": _cc(_first(r.get("category")))[1]})
+    value = _dumps(
+        {
+            "verification_status": _cc(r.get("verificationStatus"))[1],
+            "category": _cc(_first(r.get("category")))[1],
+        }
+    )
     return "condition", s, c, d, start, _ts(r.get("abatementDateTime")), status, value
 
 
-def _map_observation(r: dict) -> Mapped:
+def _map_observation(r: dict, *, rule_codes: frozenset = frozenset(), rules_only: bool = False) -> Mapped:
     s, c, d = _cc(r.get("code"))
     if not c:
         return "missing_code"
-    tag = OBSERVATION_ALLOW.get(c) if s == LOINC else None
+    tag = _tag(OBSERVATION_ALLOW, LOINC, s, c, rule_codes, rules_only)
     if tag is None:
         return None
-    start = _ts(r.get("effectiveDateTime") or (r.get("effectivePeriod") or {}).get("start") or r.get("issued"))
+    start = _ts(
+        r.get("effectiveDateTime") or (r.get("effectivePeriod") or {}).get("start") or r.get("issued")
+    )
     if not start:
         return "missing_date"
     return "observation", s, c, d, start, None, r.get("status"), _obs_value(r, tag)
 
 
-def _map_procedure(r: dict) -> Mapped:
+def _map_procedure(r: dict, *, rule_codes: frozenset = frozenset(), rules_only: bool = False) -> Mapped:
     s, c, d = _cc(r.get("code"))
     if not c:
         return "missing_code"
-    tag = PROCEDURE_ALLOW.get(c) if s == SNOMED else None
+    tag = _tag(PROCEDURE_ALLOW, SNOMED, s, c, rule_codes, rules_only)
     if tag is None:
         return None
     per = r.get("performedPeriod") or {}
@@ -251,7 +317,7 @@ def _map_procedure(r: dict) -> Mapped:
     return "procedure", s, c, d, start, _ts(per.get("end")), r.get("status"), _dumps({"tag": tag})
 
 
-def _map_immunization(r: dict) -> Mapped:
+def _map_immunization(r: dict, **_ignored) -> Mapped:
     s, c, d = _cc(r.get("vaccineCode"))
     if not c:
         return "missing_code"
@@ -261,7 +327,7 @@ def _map_immunization(r: dict) -> Mapped:
     return "immunization", s, c, d, start, None, r.get("status"), None
 
 
-def _map_medication_request(r: dict) -> Mapped:
+def _map_medication_request(r: dict, **_ignored) -> Mapped:
     s, c, d = _cc(r.get("medicationCodeableConcept"))
     if not c:
         return "missing_code"
@@ -272,43 +338,69 @@ def _map_medication_request(r: dict) -> Mapped:
     return "medication", s, c, d, start, None, r.get("status"), value
 
 
-def _map_diagnostic_report(r: dict) -> Mapped:
+def _map_diagnostic_report(
+    r: dict, *, rule_codes: frozenset = frozenset(), rules_only: bool = False
+) -> Mapped:
     s, c, d = _cc(r.get("code"))
     if not c:
         return "missing_code"
-    tag = DIAGNOSTIC_REPORT_ALLOW.get(c) if s == LOINC else None
+    tag = _tag(DIAGNOSTIC_REPORT_ALLOW, LOINC, s, c, rule_codes, rules_only)
     if tag is None:
         return None
     start = _ts(r.get("effectiveDateTime") or r.get("issued"))
     if not start:
         return "missing_date"
-    return "diagnostic_report", s, c, d, start, None, r.get("status"), _dumps({"tag": tag, "results": len(r.get("result") or [])})
+    return (
+        "diagnostic_report",
+        s,
+        c,
+        d,
+        start,
+        None,
+        r.get("status"),
+        _dumps({"tag": tag, "results": len(r.get("result") or [])}),
+    )
 
 
-def _map_encounter(r: dict) -> Mapped:
+def _map_encounter(r: dict, **_ignored) -> Mapped:
     period = r.get("period") or {}
     start = _ts(period.get("start"))
     if not start:
         return "missing_date"
     s, c, d = _cc(_first(r.get("type")))
-    value = _dumps({"class": (r.get("class") or {}).get("code"), "reason": _cc(_first(r.get("reasonCode")))[2]})
+    value = _dumps(
+        {"class": (r.get("class") or {}).get("code"), "reason": _cc(_first(r.get("reasonCode")))[2]}
+    )
     return "encounter", s, c, d, start, _ts(period.get("end")), r.get("status"), value
 
 
-def _map_document_reference(r: dict) -> Mapped:
+def _map_document_reference(r: dict, **_ignored) -> Mapped:
     start = _ts(r.get("date"))
     if not start:
         return "missing_date"
     s, c, d = _cc(r.get("type"))
     att = _first(r.get("content")).get("attachment") or {}
     value = _dumps({"content_type": att.get("contentType"), "attachment_chars": len(att.get("data") or "")})
-    return "document_reference", s, c, d, start, None, r.get("status"), value  # note body deliberately dropped
+    return (
+        "document_reference",
+        s,
+        c,
+        d,
+        start,
+        None,
+        r.get("status"),
+        value,
+    )  # note body deliberately dropped
 
 
-MAPPERS: dict[str, Callable[[dict], Mapped]] = {
-    "Condition": _map_condition, "Procedure": _map_procedure, "Observation": _map_observation,
-    "Immunization": _map_immunization, "MedicationRequest": _map_medication_request,
-    "DiagnosticReport": _map_diagnostic_report, "Encounter": _map_encounter,
+MAPPERS: dict[str, Callable[..., Mapped]] = {
+    "Condition": _map_condition,
+    "Procedure": _map_procedure,
+    "Observation": _map_observation,
+    "Immunization": _map_immunization,
+    "MedicationRequest": _map_medication_request,
+    "DiagnosticReport": _map_diagnostic_report,
+    "Encounter": _map_encounter,
     "DocumentReference": _map_document_reference,
 }
 
@@ -329,11 +421,36 @@ def _lines(path: Path) -> Iterator[bytes]:
 class BatchNormalizer:
     """residents() must be consumed before clinical_records() (it builds the patient-reference map)."""
 
-    def __init__(self, dataset_version: str, batch_dir: Path, *, source_version: str | None = None):
+    def __init__(
+        self,
+        dataset_version: str,
+        batch_dir: Path,
+        *,
+        source_version: str | None = None,
+        profile: str = FULL,
+        rule_codes: RuleCodes | None = None,
+    ):
+        if profile not in (FULL, RULES):
+            raise ValueError(f"unknown storage profile {profile!r}")
         self.dataset_version, self.batch_dir = dataset_version, Path(batch_dir)
         self.batch_id = self.batch_dir.name
         self.source_system = source_system(dataset_version)
-        self.source_version = source_version
+        self.profile = profile
+        self.rules_only = profile == RULES
+        self.rule_codes = rule_codes or load_rule_codes()
+        self.source_version = marked_source_version(source_version, profile)
+        self._mapper_kwargs = {"rule_codes": self.rule_codes.codes, "rules_only": self.rules_only}
+        # Rules profile: lines that cannot contain a referenced code are dropped before JSON parsing (counted as skipped).
+        # A malformed line without a referenced code is therefore counted as skipped, not quarantined.
+        self._prefilter = (
+            re.compile(
+                rb'"code"\s*:\s*"(?:'
+                + b"|".join(re.escape(c.encode()) for _, c in sorted(self.rule_codes.codes))
+                + rb')"'
+            )
+            if self.rules_only
+            else None
+        )
         self.stats = NormStats()
         self.quarantine = Quarantine(self.batch_dir / "quarantine.ndjson", self.stats)
         self._patients: dict[str, uuid.UUID] | None = None
@@ -357,8 +474,14 @@ class BatchNormalizer:
                 continue
             pid = r.get("id")
             if r.get("resourceType") != "Patient" or not pid:
-                self.quarantine.add("missing_id" if r.get("resourceType") == "Patient" else "unexpected_resource_type",
-                                    "Patient", pid, path.name, n, raw)
+                self.quarantine.add(
+                    "missing_id" if r.get("resourceType") == "Patient" else "unexpected_resource_type",
+                    "Patient",
+                    pid,
+                    path.name,
+                    n,
+                    raw,
+                )
                 continue
             if pid in patients:
                 self.quarantine.add("duplicate_patient_id", "Patient", pid, path.name, n, raw)
@@ -378,13 +501,27 @@ class BatchNormalizer:
             patients[pid] = rid
             gender = r.get("gender")
             self.stats.emitted["Patient"] += 1
-            yield (rid, self.source_system, pid, birth_date, deceased, gender if gender in _SEX else "unknown",
-                   assign_language(rid), assign_district(rid), self.source_version)
+            yield (
+                rid,
+                self.source_system,
+                pid,
+                birth_date,
+                deceased,
+                gender if gender in _SEX else "unknown",
+                assign_language(rid),
+                assign_district(rid),
+                self.source_version,
+            )
         self._patients = patients
 
-    def clinical_records(self, types: tuple[str, ...] = CLINICAL_TYPES) -> Iterator[tuple]:
+    def clinical_records(self, types: tuple[str, ...] | None = None) -> Iterator[tuple]:
+        """Rows for `types` (default: the profile's types). The rules profile reads RULES_TYPES only."""
         if self._patients is None:
             raise RuntimeError("consume residents() first")
+        if types is None:
+            types = RULES_TYPES if self.rules_only else CLINICAL_TYPES
+        elif self.rules_only:
+            types = tuple(t for t in types if t in RULES_TYPES)
         patients = self._patients
         ref_prefix = f"synthea://{self.dataset_version}/{self.batch_id}/"
         for rtype in types:
@@ -393,8 +530,15 @@ class BatchNormalizer:
                 continue
             mapper = MAPPERS[rtype]
             read, emitted, skipped = self.stats.read, self.stats.emitted, self.stats.skipped
+            prefilter = self._prefilter if rtype in _PREFILTER_TYPES else None
+            latest_encounter: dict[
+                uuid.UUID, tuple
+            ] = {}  # rules profile: only each resident's most recent encounter
             for n, raw in enumerate(_lines(path), 1):
                 read[rtype] += 1
+                if prefilter is not None and not prefilter.search(raw):
+                    skipped[rtype] += 1
+                    continue
                 try:
                     r = orjson.loads(raw)
                 except ValueError:
@@ -402,7 +546,9 @@ class BatchNormalizer:
                     continue
                 rid = r.get("id") if isinstance(r, dict) else None
                 if not rid or r.get("resourceType") != rtype:
-                    self.quarantine.add("missing_id" if not rid else "unexpected_resource_type", rtype, rid, path.name, n, raw)
+                    self.quarantine.add(
+                        "missing_id" if not rid else "unexpected_resource_type", rtype, rid, path.name, n, raw
+                    )
                     continue
                 pid = _patient_ref(r)
                 if pid is None:
@@ -413,7 +559,7 @@ class BatchNormalizer:
                     self.quarantine.add("unknown_patient", rtype, rid, path.name, n, raw)
                     continue
                 try:
-                    m = mapper(r)
+                    m = mapper(r, **self._mapper_kwargs)
                 except ValueError:
                     self.quarantine.add("invalid_date", rtype, rid, path.name, n, raw)
                     continue
@@ -427,16 +573,42 @@ class BatchNormalizer:
                     self.quarantine.add(m, rtype, rid, path.name, n, raw)
                     continue
                 category, system, code, display, start, end, status, value = m
+                row = (
+                    resident,
+                    rtype,
+                    rid,
+                    self.source_system,
+                    category,
+                    system,
+                    code,
+                    display,
+                    start,
+                    end,
+                    status,
+                    value,
+                    f"{ref_prefix}{rtype}/{rid}",
+                )
+                if self.rules_only and rtype == "Encounter":
+                    best = latest_encounter.get(resident)
+                    if best is not None:
+                        skipped[rtype] += 1
+                    if best is None or start > best[8]:
+                        latest_encounter[resident] = row
+                    continue
                 emitted[rtype] += 1
-                yield (resident, rtype, rid, self.source_system, category, system, code, display, start, end, status,
-                       value, f"{ref_prefix}{rtype}/{rid}")
+                yield row
+            for row in latest_encounter.values():
+                emitted[rtype] += 1
+                yield row
 
 
 # ---- CLI: normalization-only run (no database) for throughput measurement ---------------------------------------------
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="python -m anticipa.datafabric.normalize")
     p.add_argument("--dataset-version", required=True)
-    p.add_argument("--batch", type=int, action="append", help="batch index (repeatable); default all completed")
+    p.add_argument(
+        "--batch", type=int, action="append", help="batch index (repeatable); default all completed"
+    )
     p.add_argument("--data-dir", type=Path, default=SYNTHEA_DIR)
     a = p.parse_args(argv)
     ds_dir = a.data_dir / a.dataset_version
@@ -448,7 +620,9 @@ def main(argv: list[str] | None = None) -> None:
     residents = records = lines = 0
     t0 = time.monotonic()
     for i in indices:
-        norm = BatchNormalizer(a.dataset_version, ds_dir / f"batch-{i}", source_version=manifest["generator_version"])
+        norm = BatchNormalizer(
+            a.dataset_version, ds_dir / f"batch-{i}", source_version=manifest["generator_version"]
+        )
         residents += sum(1 for _ in norm.residents())
         records += sum(1 for _ in norm.clinical_records())
         norm.close()
@@ -457,11 +631,22 @@ def main(argv: list[str] | None = None) -> None:
     dt = time.monotonic() - t0
     lines = sum(total.read.values())
     mi = psutil.Process().memory_info()
-    print(json.dumps({
-        "batches": len(indices), "residents": residents, "clinical_records": records, "lines_read": lines,
-        "seconds": round(dt, 2), "lines_per_s": round(lines / dt), "rows_per_s": round(records / dt),
-        "peak_rss_mb": round(getattr(mi, "peak_wset", mi.rss) / 2**20, 1), "stats": total.to_dict(),
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "batches": len(indices),
+                "residents": residents,
+                "clinical_records": records,
+                "lines_read": lines,
+                "seconds": round(dt, 2),
+                "lines_per_s": round(lines / dt),
+                "rows_per_s": round(records / dt),
+                "peak_rss_mb": round(getattr(mi, "peak_wset", mi.rss) / 2**20, 1),
+                "stats": total.to_dict(),
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

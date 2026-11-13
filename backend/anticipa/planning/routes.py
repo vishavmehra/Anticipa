@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Header, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, Header, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -243,7 +243,18 @@ class ConfirmOut(BaseModel):
     allocation: AllocationOut
     capacity_slot_id: uuid.UUID
     newly_confirmed: bool
-    appointment_created: bool = False  # appointments are a later wave: confirmation only reserves capacity
+    appointment_created: bool  # the engagement module held the slot with a simulated appointment in this call
+    synthetic_status: str = "simulated"
+
+
+class ReleaseIn(BaseModel):
+    reason: str | None = Field(None, max_length=300)
+
+
+class ReleaseOut(BaseModel):
+    allocation: AllocationOut
+    capacity_slot_id: uuid.UUID
+    released: bool  # False: already released (idempotent no-op)
     synthetic_status: str = "simulated"
 
 
@@ -463,12 +474,24 @@ def list_unallocated(
 
 
 @planning.post("/allocations/{allocation_id}/confirm", response_model=Envelope[ConfirmOut],
-               summary="Confirm a proposed allocation (re-validates the slot; reserves one seat; no appointment is created)")  # fmt: skip
+               summary="Confirm a proposed allocation: re-validates the slot (open, not started, seat free), reserves one seat, "
+                       "and has engagement hold it with a simulated appointment (same transaction)")  # fmt: skip
 def confirm_allocation(allocation_id: uuid.UUID, request: Request, session: SessionDep, user: ManageUser):
-    alloc, newly = service.confirm_allocation(session, allocation_id, user.actor)
+    result = service.confirm_allocation(session, allocation_id, user.actor, user=user)
     session.commit()
-    return ok(request, ConfirmOut(allocation=AllocationOut.model_validate(alloc), capacity_slot_id=alloc.capacity_slot_id,
-                                  newly_confirmed=newly))  # fmt: skip
+    return ok(request, ConfirmOut(allocation=AllocationOut.model_validate(result.allocation), newly_confirmed=result.newly_confirmed,
+                                  capacity_slot_id=result.allocation.capacity_slot_id,
+                                  appointment_created=result.appointment_created))  # fmt: skip
+
+
+@planning.post("/allocations/{allocation_id}/release", response_model=Envelope[ReleaseOut],
+               summary="Release a confirmed allocation's seat (appointment cancelled / no-show); idempotent")  # fmt: skip
+def release_allocation(allocation_id: uuid.UUID, request: Request, session: SessionDep, user: ManageUser,
+                       body: Annotated[ReleaseIn | None, Body()] = None):  # fmt: skip
+    alloc, released = service.release_allocation(session, allocation_id, user.actor, reason=body.reason if body else None)
+    session.commit()
+    return ok(request, ReleaseOut(allocation=AllocationOut.model_validate(alloc), capacity_slot_id=alloc.capacity_slot_id,
+                                  released=released))  # fmt: skip
 
 
 # ----------------------------------------------------------------------------------------------- analytics

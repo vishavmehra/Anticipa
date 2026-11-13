@@ -1,5 +1,6 @@
 "use client";
 
+import { selectClass } from "@/components/ui";
 import Link from "next/link";
 import { useState } from "react";
 import { apiList } from "@/lib/api";
@@ -18,7 +19,7 @@ const columns: Column<Job>[] = [
     header: "Job",
     cell: (j) => (
       <>
-        <Link href={`/jobs/${j.id}`} className="font-medium text-link underline underline-offset-2">
+        <Link href={`/jobs/${j.id}`} className="font-medium text-brand-ink underline underline-offset-2">
           {j.job_type}
         </Link>
         <p className="font-mono text-xs text-ink-muted">{j.id.slice(0, 8)}</p>
@@ -74,7 +75,7 @@ export default function JobsPage() {
                 setStatus(e.target.value);
                 setPage(1);
               }}
-              className="min-h-9 rounded-sm border border-line-strong bg-surface px-2.5 text-sm text-ink"
+              className={selectClass}
             >
               <option value="">All</option>
               {JOB_STATUSES.map((s) => (

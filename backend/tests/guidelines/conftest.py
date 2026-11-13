@@ -1,4 +1,5 @@
-"""Guideline-engine fixtures. DB fixtures (`db_session`, `api_client`, `auth_headers`) come from tests/conftest.py and
+"""Guideline-engine fixtures. DB fixtures (`db_session`, `api_client`, `auth_headers`) come from
+tests/conftest.py and
 run against DB `anticipa_test` only. `seed` builds clearly synthetic residents/records/rules (see seed.py)."""
 
 from __future__ import annotations

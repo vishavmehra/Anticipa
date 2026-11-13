@@ -1,0 +1,21 @@
+// Public surface of the judge-facing feature components. Routes import from "@/components/features".
+export { EvidenceInNote, NoteText, ShowInNote } from "./note-viewer";
+export { WhyDue, WhyDueBody, criterionState } from "./why-due";
+export { JourneyView as ResidentJourney } from "./journey";
+export { SourceLabel, Tag } from "./shared";
+export { PopulationFunnel } from "./funnel";
+export { EvaluationDashboard } from "./evaluation";
+export { ProcessingMonitor } from "./monitor";
+export { FamilyPedigree } from "./pedigree";
+export { OutreachPreview } from "./outreach-preview";
+export { PopulationJourney } from "./population-journey";
+export { ProgramsImpact } from "./impact";
+export { EvidenceGuidelines } from "./evidence-guidelines";
+export { PlanningStudio } from "./planning-studio";
+export { PillTabs, TabPanel, type PillTab } from "./kit";
+export { OperationsCapacity } from "./operations";
+export { PreventivePrograms } from "./programs";
+export { Pyramid } from "./pyramid";
+export { CompareNote } from "./compare";
+export { InfoTip } from "./interactive";
+export type { PopulationExplorer, PyramidCell, ExplorerSlice, ScopeTotals } from "./payloads";

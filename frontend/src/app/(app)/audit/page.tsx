@@ -34,7 +34,7 @@ const columns: Column<AuditEvent>[] = [
           {e.resource_id && <p className="font-mono text-xs text-ink-muted">{e.resource_id.slice(0, 8)}</p>}
         </>
       ) : (
-        "—"
+        "None"
       ),
   },
   { key: "outcome", header: "Outcome", cell: (e) => <StatusBadge status={e.outcome} /> },
@@ -44,8 +44,8 @@ const columns: Column<AuditEvent>[] = [
     cell: (e) =>
       e.details && Object.keys(e.details).length ? (
         <details>
-          <summary className="cursor-pointer text-link underline underline-offset-2">View</summary>
-          <pre className="mt-1 max-h-48 max-w-xs overflow-auto rounded-sm border border-line bg-paper p-2 font-mono text-xs">
+          <summary className="cursor-pointer text-brand-ink underline underline-offset-2">View</summary>
+          <pre className="mt-1 max-h-48 max-w-xs overflow-auto rounded-sm border border-line bg-canvas p-2 font-mono text-xs">
             {JSON.stringify(e.details, null, 2)}
           </pre>
         </details>
@@ -53,7 +53,7 @@ const columns: Column<AuditEvent>[] = [
         <span className="text-ink-muted">None</span>
       ),
   },
-  { key: "req", header: "Request", cell: (e) => <span className="font-mono text-xs">{e.request_id?.slice(0, 8) ?? "—"}</span> },
+  { key: "req", header: "Request", cell: (e) => <span className="font-mono text-xs">{e.request_id?.slice(0, 8) ?? "None"}</span> },
 ];
 
 export default function AuditPage() {
@@ -65,7 +65,7 @@ export default function AuditPage() {
     <>
       <PageHeader
         title="Audit"
-        description="Append-only record of sensitive actions. Entries cannot be edited or deleted."
+        description="A permanent record of sensitive actions. Entries cannot be edited or deleted."
         actions={
           <button type="button" className={btnSecondary} onClick={audit.reload} disabled={audit.loading}>
             Refresh

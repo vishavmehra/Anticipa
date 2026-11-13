@@ -65,7 +65,7 @@ export function EvidenceQuote({
       </blockquote>
       <figcaption className="tnum flex flex-wrap items-center gap-x-3 border-t border-line px-3 py-1.5 text-xs text-ink-muted">
         <span>
-          Characters {start + shift}–{end + shift}
+          Characters {start + shift} to {end + shift}
         </span>
         {quote !== undefined &&
           (mismatch ? (

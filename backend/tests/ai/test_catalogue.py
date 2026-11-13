@@ -37,12 +37,14 @@ def test_shipped_models_toml_matches_the_verified_catalogue():
     validate_config(cfg)
     assert {"evidence.extract", "evidence.extract.complex", "evidence.review", "engagement.draft",
             "embedding.document"} <= set(cfg.tasks)  # fmt: skip
-    assert [c.ref for c in cfg.tasks["evidence.extract"].candidates] == [
-        "nebius:Qwen/Qwen3-235B-A22B-Instruct-2507", "anthropic:claude-haiku-5-5",
-    ]  # fmt: skip
+    # owner decision 2026-11-11: Haiku for bulk extraction (no Nebius fallback), Sonnet only by escalation
+    assert [c.ref for c in cfg.tasks["evidence.extract"].candidates] == ["anthropic:claude-haiku-5-5"]
     assert [c.ref for c in cfg.tasks["evidence.extract.complex"].candidates] == [
-        "anthropic:claude-sonnet-5-5", "anthropic:claude-opus-5-5",
-    ]  # fmt: skip
+        "anthropic:claude-sonnet-5-5"
+    ]
+    assert [c.ref for c in cfg.tasks["engagement.draft"].candidates] == ["anthropic:claude-haiku-5-5"]
+    nebius_routes = {t for t, r in cfg.tasks.items() if any(c.provider == "nebius" for c in r.candidates)}
+    assert nebius_routes == {"embedding.document"}  # the only Nebius route, and it is opt-in
     assert cfg.tasks["embedding.document"].dimensions == 1024
 
 
@@ -141,17 +143,32 @@ def test_daily_budget_default_env_override_and_validation(monkeypatch):
 
 def test_build_router_wires_adapters_budget_and_enforces_catalogue():
     s = AiSettings(
-        _env_file=None, anthropic_api_key="sk-ant-x", nebius_api_key="n-x", anticipa_ai_daily_budget_usd="2.5"
+        _env_file=None,
+        anthropic_api_key="sk-ant-x",
+        nebius_api_key="n-x",
+        anticipa_enable_nebius=True,
+        anticipa_ai_daily_budget_usd="2.5",
     )
     router = build_router(settings=s)
     assert set(router.adapters) == {"anthropic", "nebius"} and router.daily_budget_usd == Decimal("2.5")
-    keyless = build_router(
-        settings=AiSettings(_env_file=None)
-    )  # no keys: builds, candidates fail at call time
+    assert router.provider_credit_usd == {"nebius": Decimal("50.00")} and router.run_budget_usd is None
+    keyless = build_router(settings=AiSettings(_env_file=None))  # no keys: builds, calls fail at call time
     assert keyless.adapters == {}
     bad = cfg_with(models=[model_entry(id="Qwen/Not-A-Real-Model")])
     with pytest.raises(CatalogueError):
         build_router(settings=s, config=bad)
+
+
+def test_nebius_is_off_by_default_even_with_a_key_and_the_response_cache_is_on():
+    s = AiSettings(_env_file=None, anthropic_api_key="sk-ant-x", nebius_api_key="n-x")
+    assert s.anticipa_enable_nebius is False and s.enabled_providers == {"anthropic"}
+    router = build_router(settings=s)
+    assert set(router.adapters) == {"anthropic"}  # no Nebius adapter exists at all
+    assert router.cache is not None  # every successful output is cached by default
+    assert build_router(settings=s, run_budget=True).run_budget_usd == Decimal("40.00")
+    assert AiSettings(_env_file=None).anticipa_nebius_credit_usd == Decimal("50.00")
+    assert AiSettings(_env_file=None).anticipa_nebius_run_approved_usd is None
+    assert AiSettings(_env_file=None, anticipa_llm_cache=False).anticipa_llm_cache is False
 
 
 # ------------------------------------------------------------------------------------ prompts
@@ -220,3 +237,14 @@ async def test_db_sink_writes_and_sums_todays_spend_via_lazy_model_import(monkey
     yesterday = now - timedelta(days=1)
     await sink.record(InvocationRecord(id="c" * 32, cost_usd=Decimal("9"), created_at=yesterday, **base))
     assert await sink.spent_today_usd() == Decimal("1.25")
+
+
+def test_escalation_share_defaults_to_the_ceiling_and_can_never_exceed_it():
+    assert AiSettings(_env_file=None).anticipa_ai_escalation_share == Decimal("0.10")
+    assert AiSettings(
+        _env_file=None, anticipa_ai_escalation_share="0.02"
+    ).anticipa_ai_escalation_share == Decimal("0.02")
+    with pytest.raises(ValidationError):
+        AiSettings(_env_file=None, anticipa_ai_escalation_share="0.11")
+    with pytest.raises(ValidationError):
+        AiSettings(_env_file=None, anticipa_ai_escalation_share="-0.01")

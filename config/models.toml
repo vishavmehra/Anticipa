@@ -86,19 +86,20 @@ input_per_mtok = 0.01
 output_per_mtok = 0.0
 verified_on = "2026-11-06"
 
-# ---- Task routes ----
+# ---- Task routes (owner decision 2026-11-11: credits $100 Anthropic / $50 Nebius, preserve Nebius) ----
+# Nebius is OFF unless ANTICIPA_ENABLE_NEBIUS=1: with it unset every Nebius candidate is dropped at routing time
+# (embeddings included) and no Nebius adapter exists. There is no automatic fallback from Claude to Nebius.
 # effort: Claude output_config.effort (claude-opus-5-5 cannot disable thinking; effort is the depth control).
 # temperature: sent to Nebius only (Claude 5.5 models reject sampling parameters).
 
-[tasks."evidence.extract"]            # bulk extraction: cheap open model first, Claude Haiku as fallback
+[tasks."evidence.extract"]            # bulk extraction: Haiku only; transient errors retry Haiku, then the document fails
 kind = "chat"
-candidates = ["nebius:Qwen/Qwen3-235B-A22B-Instruct-2507", "anthropic:claude-haiku-5-5"]
+candidates = ["anthropic:claude-haiku-5-5"]
 effort = "low"
-temperature = 0.0
 
-[tasks."evidence.extract.complex"]    # ambiguous / multilingual / family-history documents
+[tasks."evidence.extract.complex"]    # escalation only (deterministic triggers, <= 10% of the cohort's documents)
 kind = "chat"
-candidates = ["anthropic:claude-sonnet-5-5", "anthropic:claude-opus-5-5"]
+candidates = ["anthropic:claude-sonnet-5-5"]
 effort = "high"
 
 [tasks."evidence.review"]             # quality review of extraction results (assistive only)
@@ -106,13 +107,22 @@ kind = "chat"
 candidates = ["anthropic:claude-opus-5-5"]
 effort = "high"
 
-[tasks."engagement.draft"]            # resident-message drafting (requires approval downstream)
+[tasks."engagement.draft"]            # resident-message drafting (templates stay the default; requires approval)
 kind = "chat"
-candidates = ["anthropic:claude-haiku-5-5", "nebius:Qwen/Qwen3-30B-A3B-Instruct-2507"]
+candidates = ["anthropic:claude-haiku-5-5"]
 effort = "low"
-temperature = 0.3
 
-[tasks."embedding.document"]
+[tasks."ask.analytics"]               # Ask Anticipa: population analytics Q and A (tool loop, aggregates only); Haiku only
+kind = "chat"
+candidates = ["anthropic:claude-haiku-5-5"]
+effort = "low"
+
+[tasks."engagement.converse"]         # resident conversation (ADR-071): logistics replies only; Haiku, no fallback, no Nebius
+kind = "chat"
+candidates = ["anthropic:claude-haiku-5-5"]
+effort = "low"
+
+[tasks."embedding.document"]          # opt-in: only routable with ANTICIPA_ENABLE_NEBIUS=1
 kind = "embedding"
 candidates = ["nebius:Qwen/Qwen3-Embedding-8B"]
 dimensions = 1024                     # pgvector vector(1024); HNSW limit is 2000

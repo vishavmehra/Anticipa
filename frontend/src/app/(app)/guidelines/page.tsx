@@ -1,5 +1,6 @@
 "use client";
 
+import { selectClass } from "@/components/ui";
 import Link from "next/link";
 import { useState } from "react";
 import { apiList } from "@/lib/api";
@@ -13,26 +14,28 @@ import { PageHeader, btnSecondary } from "@/components/ui";
 const PAGE_SIZE = 25;
 const STATUSES = ["draft", "in_review", "approved", "retired"] as const;
 
+const vs = (g: Guideline) => g.versions ?? [];
+
 const columns: Column<Guideline>[] = [
   {
     key: "title",
     header: "Guideline",
     cell: (g) => (
-      <Link href={`/guidelines/${g.id}`} className="font-medium text-link underline underline-offset-2">
+      <Link href={`/guidelines/${g.id}`} className="font-medium text-brand-ink underline underline-offset-2">
         {g.name}
       </Link>
     ),
   },
-  { key: "topic", header: "Topic", cell: (g) => g.topic ?? "—" },
+  { key: "topic", header: "Topic", cell: (g) => g.topic ?? "None" },
   { key: "source", header: "Authoritative source", cell: (g) => g.authoritative_source ?? <span className="text-ink-muted">Not recorded</span> },
   {
     key: "state",
     header: "Latest version",
     cell: (g) =>
-      g.versions[0] ? (
+      vs(g)[0] ? (
         <span className="inline-flex flex-wrap items-center gap-1.5">
-          <span className="tnum">v{g.versions[0].version}</span>
-          <StatusBadge status={g.versions[0].review_status} />
+          <span className="tnum">v{vs(g)[0].version}</span>
+          <StatusBadge status={vs(g)[0].review_status} />
         </span>
       ) : (
         <span className="text-ink-muted">No versions</span>
@@ -42,7 +45,7 @@ const columns: Column<Guideline>[] = [
     key: "approved",
     header: "Approved version",
     cell: (g) => {
-      const a = g.versions.find((v) => v.review_status === "approved");
+      const a = vs(g).find((v) => v.review_status === "approved");
       return a ? <span className="tnum">v{a.version}</span> : <span className="text-ink-muted">None approved</span>;
     },
   },
@@ -72,7 +75,7 @@ export default function GuidelinesPage() {
                 setStatus(e.target.value);
                 setPage(1);
               }}
-              className="min-h-9 rounded-sm border border-line-strong bg-surface px-2.5 text-sm text-ink"
+              className={selectClass}
             >
               <option value="">All</option>
               {STATUSES.map((s) => (

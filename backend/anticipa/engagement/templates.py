@@ -29,8 +29,24 @@ SIMULATION_MARKERS = {
     "ar": "[رسالة محاكاة - هذه محاكاة ولم يتم إرسالها إلى شخص حقيقي]",
 }
 
-VERSIONS = {"preventive_care_reminder": 1}
+VERSIONS = {"preventive_care_reminder": 1, "preparation_info": 1}
 TEMPLATES: dict[str, dict[str, str]] = {
+    # Generic arrival information only (what to bring, arrive early). No test specific preparation: a question about that
+    # is a clinical question and goes to a clinician. The resident conversation (ADR-071) quotes this text and nothing else.
+    "preparation_info": {
+        "en": (
+            "Please bring a photo ID and any earlier reports about this screening, and arrive a little before your appointment time. "
+            "Your clinic will tell you if this test needs any special preparation."
+        ),
+        "hi": (
+            "कृपया अपना फोटो पहचान पत्र और इस जाँच से जुड़ी पिछली रिपोर्ट साथ लाएँ, और अपनी अपॉइंटमेंट के समय से थोड़ा पहले पहुँचें। "
+            "यदि इस जाँच के लिए किसी विशेष तैयारी की ज़रूरत होगी, तो आपका क्लिनिक आपको बताएगा।"
+        ),
+        "ar": (
+            "يرجى إحضار هوية بصورة وأي تقارير سابقة تتعلق بهذا الفحص، والوصول قبل موعدك بقليل. "
+            "وستخبرك عيادتك إذا كان هذا الفحص يحتاج إلى تحضير خاص."
+        ),
+    },
     "preventive_care_reminder": {
         "en": (
             "Hello. Your care team would like to remind you that the following preventive care is due: {activity}. "

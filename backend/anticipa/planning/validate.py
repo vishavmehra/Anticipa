@@ -137,6 +137,11 @@ def resident_time_conflict(allocs: Sequence[Allocation], ctx: PlanContext) -> li
     return out
 
 
+def consent_respected(allocs: Sequence[Allocation], ctx: PlanContext) -> list[Violation]:
+    return [Violation("consent_respected", a.case_id, a.slot_id, "opted out of all outreach channels")
+            for a in allocs if (c := ctx.cases.get(a.case_id)) and c.consent_denied]  # fmt: skip
+
+
 # Q-027 answer for the MVP: the planner's declared hard constraints. Every entry has a validator by construction.
 HARD_CONSTRAINTS: dict[str, Check] = {
     "case_in_scope": case_in_scope,
@@ -149,6 +154,7 @@ HARD_CONSTRAINTS: dict[str, Check] = {
     "planning_horizon": planning_horizon,
     "travel_eligibility": travel_eligibility,
     "resident_time_conflict": resident_time_conflict,
+    "consent_respected": consent_respected,
 }
 
 

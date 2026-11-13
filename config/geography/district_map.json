@@ -1,0 +1,327 @@
+{
+  "schema": "anticipa.geography.district_map.v1",
+  "decision": "ADR-068",
+  "assumption": "The ten pilot district codes D01 to D10 carried by residents.district_code are placed in the real Indian districts below as part of the synthetic data design (weighted to Madhya Pradesh). Resident rows are unchanged; the mapping is applied only when reading. It says nothing about real people.",
+  "lgd_note": "State codes are the Local Government Directory (LGD) state codes, which equal the 2011 Census state codes. LGD district codes could not be verified against the LGD directory in this environment, so lgd_district_code is null on purpose and must never be guessed; fill it from lgdirectory.gov.in when verified.",
+  "centroid_note": "lat and lon are approximate city centre coordinates for placing a marker on a map, not boundaries.",
+  "districts": [
+    {
+      "code": "D01",
+      "district": "Bhopal",
+      "state_code": "23",
+      "state": "Madhya Pradesh",
+      "iso_3166_2": "IN-MP",
+      "lgd_district_code": null,
+      "lat": 23.26,
+      "lon": 77.41
+    },
+    {
+      "code": "D02",
+      "district": "Indore",
+      "state_code": "23",
+      "state": "Madhya Pradesh",
+      "iso_3166_2": "IN-MP",
+      "lgd_district_code": null,
+      "lat": 22.72,
+      "lon": 75.86
+    },
+    {
+      "code": "D03",
+      "district": "Jabalpur",
+      "state_code": "23",
+      "state": "Madhya Pradesh",
+      "iso_3166_2": "IN-MP",
+      "lgd_district_code": null,
+      "lat": 23.18,
+      "lon": 79.99
+    },
+    {
+      "code": "D04",
+      "district": "Gwalior",
+      "state_code": "23",
+      "state": "Madhya Pradesh",
+      "iso_3166_2": "IN-MP",
+      "lgd_district_code": null,
+      "lat": 26.22,
+      "lon": 78.18
+    },
+    {
+      "code": "D05",
+      "district": "Pune",
+      "state_code": "27",
+      "state": "Maharashtra",
+      "iso_3166_2": "IN-MH",
+      "lgd_district_code": null,
+      "lat": 18.52,
+      "lon": 73.86
+    },
+    {
+      "code": "D06",
+      "district": "Nagpur",
+      "state_code": "27",
+      "state": "Maharashtra",
+      "iso_3166_2": "IN-MH",
+      "lgd_district_code": null,
+      "lat": 21.15,
+      "lon": 79.09
+    },
+    {
+      "code": "D07",
+      "district": "Lucknow",
+      "state_code": "09",
+      "state": "Uttar Pradesh",
+      "iso_3166_2": "IN-UP",
+      "lgd_district_code": null,
+      "lat": 26.85,
+      "lon": 80.95
+    },
+    {
+      "code": "D08",
+      "district": "Varanasi",
+      "state_code": "09",
+      "state": "Uttar Pradesh",
+      "iso_3166_2": "IN-UP",
+      "lgd_district_code": null,
+      "lat": 25.32,
+      "lon": 82.99
+    },
+    {
+      "code": "D09",
+      "district": "Bengaluru Urban",
+      "state_code": "29",
+      "state": "Karnataka",
+      "iso_3166_2": "IN-KA",
+      "lgd_district_code": null,
+      "lat": 12.97,
+      "lon": 77.59
+    },
+    {
+      "code": "D10",
+      "district": "Mysuru",
+      "state_code": "29",
+      "state": "Karnataka",
+      "iso_3166_2": "IN-KA",
+      "lgd_district_code": null,
+      "lat": 12.3,
+      "lon": 76.64
+    }
+  ],
+  "states": [
+    {
+      "code": "01",
+      "name": "Jammu and Kashmir",
+      "iso_3166_2": "IN-JK",
+      "type": "union_territory"
+    },
+    {
+      "code": "02",
+      "name": "Himachal Pradesh",
+      "iso_3166_2": "IN-HP",
+      "type": "state"
+    },
+    {
+      "code": "03",
+      "name": "Punjab",
+      "iso_3166_2": "IN-PB",
+      "type": "state"
+    },
+    {
+      "code": "04",
+      "name": "Chandigarh",
+      "iso_3166_2": "IN-CH",
+      "type": "union_territory"
+    },
+    {
+      "code": "05",
+      "name": "Uttarakhand",
+      "iso_3166_2": "IN-UT",
+      "type": "state"
+    },
+    {
+      "code": "06",
+      "name": "Haryana",
+      "iso_3166_2": "IN-HR",
+      "type": "state"
+    },
+    {
+      "code": "07",
+      "name": "Delhi",
+      "iso_3166_2": "IN-DL",
+      "type": "union_territory"
+    },
+    {
+      "code": "08",
+      "name": "Rajasthan",
+      "iso_3166_2": "IN-RJ",
+      "type": "state"
+    },
+    {
+      "code": "09",
+      "name": "Uttar Pradesh",
+      "iso_3166_2": "IN-UP",
+      "type": "state"
+    },
+    {
+      "code": "10",
+      "name": "Bihar",
+      "iso_3166_2": "IN-BR",
+      "type": "state"
+    },
+    {
+      "code": "11",
+      "name": "Sikkim",
+      "iso_3166_2": "IN-SK",
+      "type": "state"
+    },
+    {
+      "code": "12",
+      "name": "Arunachal Pradesh",
+      "iso_3166_2": "IN-AR",
+      "type": "state"
+    },
+    {
+      "code": "13",
+      "name": "Nagaland",
+      "iso_3166_2": "IN-NL",
+      "type": "state"
+    },
+    {
+      "code": "14",
+      "name": "Manipur",
+      "iso_3166_2": "IN-MN",
+      "type": "state"
+    },
+    {
+      "code": "15",
+      "name": "Mizoram",
+      "iso_3166_2": "IN-MZ",
+      "type": "state"
+    },
+    {
+      "code": "16",
+      "name": "Tripura",
+      "iso_3166_2": "IN-TR",
+      "type": "state"
+    },
+    {
+      "code": "17",
+      "name": "Meghalaya",
+      "iso_3166_2": "IN-ML",
+      "type": "state"
+    },
+    {
+      "code": "18",
+      "name": "Assam",
+      "iso_3166_2": "IN-AS",
+      "type": "state"
+    },
+    {
+      "code": "19",
+      "name": "West Bengal",
+      "iso_3166_2": "IN-WB",
+      "type": "state"
+    },
+    {
+      "code": "20",
+      "name": "Jharkhand",
+      "iso_3166_2": "IN-JH",
+      "type": "state"
+    },
+    {
+      "code": "21",
+      "name": "Odisha",
+      "iso_3166_2": "IN-OD",
+      "type": "state"
+    },
+    {
+      "code": "22",
+      "name": "Chhattisgarh",
+      "iso_3166_2": "IN-CT",
+      "type": "state"
+    },
+    {
+      "code": "23",
+      "name": "Madhya Pradesh",
+      "iso_3166_2": "IN-MP",
+      "type": "state"
+    },
+    {
+      "code": "24",
+      "name": "Gujarat",
+      "iso_3166_2": "IN-GJ",
+      "type": "state"
+    },
+    {
+      "code": "27",
+      "name": "Maharashtra",
+      "iso_3166_2": "IN-MH",
+      "type": "state"
+    },
+    {
+      "code": "28",
+      "name": "Andhra Pradesh",
+      "iso_3166_2": "IN-AP",
+      "type": "state"
+    },
+    {
+      "code": "29",
+      "name": "Karnataka",
+      "iso_3166_2": "IN-KA",
+      "type": "state"
+    },
+    {
+      "code": "30",
+      "name": "Goa",
+      "iso_3166_2": "IN-GA",
+      "type": "state"
+    },
+    {
+      "code": "31",
+      "name": "Lakshadweep",
+      "iso_3166_2": "IN-LD",
+      "type": "union_territory"
+    },
+    {
+      "code": "32",
+      "name": "Kerala",
+      "iso_3166_2": "IN-KL",
+      "type": "state"
+    },
+    {
+      "code": "33",
+      "name": "Tamil Nadu",
+      "iso_3166_2": "IN-TN",
+      "type": "state"
+    },
+    {
+      "code": "34",
+      "name": "Puducherry",
+      "iso_3166_2": "IN-PY",
+      "type": "union_territory"
+    },
+    {
+      "code": "35",
+      "name": "Andaman and Nicobar Islands",
+      "iso_3166_2": "IN-AN",
+      "type": "union_territory"
+    },
+    {
+      "code": "36",
+      "name": "Telangana",
+      "iso_3166_2": "IN-TG",
+      "type": "state"
+    },
+    {
+      "code": "37",
+      "name": "Ladakh",
+      "iso_3166_2": "IN-LA",
+      "type": "union_territory"
+    },
+    {
+      "code": "38",
+      "name": "Dadra and Nagar Haveli and Daman and Diu",
+      "iso_3166_2": "IN-DH",
+      "type": "union_territory"
+    }
+  ]
+}

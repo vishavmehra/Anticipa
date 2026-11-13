@@ -47,12 +47,14 @@ from anticipa.db import make_engine
 from anticipa.main import create_app
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-TEST_DB_NAME = "anticipa_test"  # the ONLY database integration tests may create or modify
+TEST_DB_NAME = "anticipa_test"  # the database integration tests may create or modify...
+DDL_DB_NAME = "anticipa_test_ddl"  # ...and this one, for lock-heavy DDL tests (RLS/GRANT) that would deadlock
+# with other suites sharing anticipa_test. Never the dev database `anticipa`.
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "host.docker.internal"}
 SETUP_LOCK_KEY = 7_283_401  # serialises create+migrate when several pytest processes start at once
 SUPABASE_TEST_URL = "https://test-project.supabase.co"
 TEST_KID = "test-key-1"
-INTEGRATION_FIXTURES = frozenset({"test_engine", "db_session", "api_client"})
+INTEGRATION_FIXTURES = frozenset({"test_engine", "db_session", "api_client", "ddl_engine", "ddl_session"})
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -198,8 +200,8 @@ def test_database_url() -> URL:
 
 
 def _ensure_test_database(url: URL) -> None:
-    """Create DB `anticipa_test` if missing and migrate it to head, under a cluster-wide advisory lock."""
-    assert url.database == TEST_DB_NAME  # never operate on any other database
+    """Create the test database if missing and migrate it to head, under a cluster-wide advisory lock."""
+    assert url.database in {TEST_DB_NAME, DDL_DB_NAME}  # never operate on any other database
     admin = url.set(database="postgres")
     conninfo = psycopg.conninfo.make_conninfo(
         host=admin.host,
@@ -218,9 +220,9 @@ def _ensure_test_database(url: URL) -> None:
     with conn:
         conn.execute("SELECT pg_advisory_lock(%s)", (SETUP_LOCK_KEY,))
         try:
-            exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (TEST_DB_NAME,)).fetchone()
+            exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (url.database,)).fetchone()
             if not exists:
-                conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(TEST_DB_NAME)))
+                conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(url.database)))
             cfg = Config(str(BACKEND_DIR / "alembic.ini"))
             cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
             cfg.attributes["url"] = url
@@ -238,10 +240,8 @@ def test_engine(test_database_url: URL) -> Iterator[Engine]:
     engine.dispose()
 
 
-@pytest.fixture
-def db_session(test_engine: Engine) -> Iterator[Session]:
-    """Transactional session: whatever the test (or the code under test) commits is rolled back afterwards."""
-    connection = test_engine.connect()
+def _rolled_back_session(engine: Engine) -> Iterator[Session]:
+    connection = engine.connect()
     outer = connection.begin()
     session = Session(bind=connection, join_transaction_mode="create_savepoint", expire_on_commit=False)
     try:
@@ -250,6 +250,28 @@ def db_session(test_engine: Engine) -> Iterator[Session]:
         session.close()
         outer.rollback()
         connection.close()
+
+
+@pytest.fixture
+def db_session(test_engine: Engine) -> Iterator[Session]:
+    """Transactional session: whatever the test (or the code under test) commits is rolled back afterwards."""
+    yield from _rolled_back_session(test_engine)
+
+
+@pytest.fixture(scope="session")
+def ddl_engine(test_database_url: URL) -> Iterator[Engine]:
+    """Separate migrated database for tests that take ACCESS EXCLUSIVE locks (ALTER TABLE ... RLS, GRANT)."""
+    url = test_database_url.set(database=DDL_DB_NAME)
+    _ensure_test_database(url)
+    engine = make_engine(url, pool_size=2, max_overflow=2)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def ddl_session(ddl_engine: Engine) -> Iterator[Session]:
+    """Like `db_session`, on the DDL database (DDL is transactional in PostgreSQL, so it rolls back too)."""
+    yield from _rolled_back_session(ddl_engine)
 
 
 @pytest.fixture

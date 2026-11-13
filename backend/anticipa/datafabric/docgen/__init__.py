@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Deterministic synthetic clinical-document generator (templates only, no model calls).
 
     uv run --directory backend python -m anticipa.datafabric.docgen generate --dataset-version V --residents N|all --seed S

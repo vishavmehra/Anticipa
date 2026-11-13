@@ -23,6 +23,7 @@ export default defineConfig({
     timeout: 180_000,
     reuseExistingServer: false,
     env: {
+      NEXT_DIST_DIR: ".next/e2e", // separate from the dev server on :3000, which holds the lock on .next/dev (and already ignored by eslint/git)
       NEXT_PUBLIC_SUPABASE_URL: TEST_SUPABASE_URL,
       NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_test_only",
       ANTICIPA_API_ORIGIN: "http://localhost:9", // unreachable on purpose: any un-mocked /api call fails loudly

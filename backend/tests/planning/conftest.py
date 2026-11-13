@@ -13,15 +13,21 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
+from anticipa.api.errors import install_exception_handlers
+from anticipa.api.middleware import RequestContextMiddleware
 from anticipa.config import ConfigError, get_settings
+from anticipa.consent.models import ConsentRecord
+from anticipa.core.auth import CurrentUser, get_current_user
 from anticipa.core.models import AuditEvent
 from anticipa.db import Base, make_engine, make_sessionmaker
 from anticipa.jobs.models import ProcessingItem, ProcessingJob
-from anticipa.planning import adapters
+from anticipa.planning import adapters, routes, service
 from anticipa.planning.domain import PlanConfig, PlannableCase, PoolSpec, SlotSpec
 from anticipa.planning.models import (
     CapacitySlot,
@@ -59,11 +65,11 @@ def slot(p: PoolSpec, hour: int, free: int, day: int = 0, minutes: int | None = 
 
 
 def case(n: int, service: str, district: str, priority: str = "routine", language: str = "en",
-         resident: int | None = None) -> PlannableCase:  # fmt: skip
+         resident: int | None = None, consent_denied: bool = False) -> PlannableCase:  # fmt: skip
     r = n if resident is None else resident
     return PlannableCase(
         uuid.uuid5(uuid.NAMESPACE_URL, f"case:{n}"), uuid.uuid5(uuid.NAMESPACE_URL, f"resident:{r}"),
-        service, priority, district, language, T0 + timedelta(minutes=n),
+        service, priority, district, language, T0 + timedelta(minutes=n), consent_denied,
     )  # fmt: skip
 
 
@@ -105,6 +111,7 @@ def planning_engine(planning_schema) -> Iterator:
         Base.metadata.create_all(conn, tables=tables)
         adapters.care_gap_cases.create(conn)  # stand-ins for the care-gap / resident tables (projection columns only)
         adapters.residents.create(conn)
+        Base.metadata.create_all(conn, tables=[ConsentRecord.__table__])  # FK to the stand-in residents table above
     yield engine
     with root.begin() as conn:
         conn.execute(text(f'DROP SCHEMA "{planning_schema}" CASCADE'))
@@ -114,7 +121,7 @@ def planning_engine(planning_schema) -> Iterator:
 @pytest.fixture
 def sessions(planning_engine, planning_schema) -> sessionmaker:
     """Empty tables for every test."""
-    names = [m.__tablename__ for m in PLANNING_TABLES] + ["audit_events", "processing_items", "processing_jobs", "care_gap_cases", "residents"]
+    names = [m.__tablename__ for m in PLANNING_TABLES] + ["audit_events", "processing_items", "processing_jobs", "care_gap_cases", "residents", "consent_records"]
     with planning_engine.begin() as conn:
         conn.execute(text("TRUNCATE " + ", ".join(f'"{planning_schema}"."{n}"' for n in names) + " CASCADE"))
     return make_sessionmaker(planning_engine)
@@ -163,3 +170,52 @@ def seed_world():
 @pytest.fixture
 def new_run():
     return _new_run
+
+
+NOW = datetime(2026, 11, 9, tzinfo=UTC)  # before every slot the tests plan (planning horizon starts 2026-11-10)
+
+
+@pytest.fixture
+def hold_calls(monkeypatch) -> list[dict]:
+    """Pins the planning clock and replaces the engagement appointment hook with a recorder (its tables are not part
+    of the private test schema). Tests that care read the recorded calls; the hook returns `created=True`."""
+    calls: list[dict] = []
+    monkeypatch.setattr(service, "_utcnow", lambda: NOW)
+
+    def fake(session, allocation_id, *, actor, user=None, source="manual", job_id=None):
+        alloc = session.get(PlannedAllocation, allocation_id)
+        calls.append({"allocation_id": allocation_id, "actor": actor, "user": user, "source": source, "status_seen": alloc.allocation_status,
+                      "session": session})  # fmt: skip
+        return object(), True
+
+    try:
+        import anticipa.engagement.service as engagement
+
+        monkeypatch.setattr(engagement, "on_allocation_confirmed", fake)
+    except ImportError:
+        pass
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def _stubs(hold_calls):
+    return hold_calls
+
+
+@pytest.fixture
+def client(sessions):
+    app = FastAPI()
+    app.state.sessionmaker = sessions
+    install_exception_handlers(app)
+    app.add_middleware(RequestContextMiddleware)
+    app.include_router(routes.router, prefix="/api/v1")
+
+    def fake_user(request: Request) -> CurrentUser:
+        role = request.headers.get("x-test-role", "population_admin")
+        return CurrentUser(uuid.uuid5(uuid.NAMESPACE_DNS, role), f"{role}@example.test", role)
+
+    app.dependency_overrides[get_current_user] = fake_user
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c
+
+

@@ -100,10 +100,20 @@ def seed_users(
     *,
     users: tuple[tuple[str, Role, str], ...] = DEMO_USERS,
     transport: httpx.BaseTransport | None = None,
+    judge_password: str | None = None,
 ) -> list[SeedResult]:
     """Create or update every demo user. `transport` lets tests mock the Admin API (never call Supabase from
     tests)."""
     base, secret, password = _require(settings, password)
+    if judge_password is not None and len(judge_password) < MIN_PASSWORD_LENGTH:
+        raise SeedError(f"ANTICIPA_JUDGE_PASSWORD must be at least {MIN_PASSWORD_LENGTH} characters.")
+    if judge_password == password:
+        judge_password = None  # identical is the same as unset: warn below
+    if judge_password is None:
+        log.warning(
+            "every demo user shares one password: set ANTICIPA_JUDGE_PASSWORD so the shareable judge login "
+            "cannot sign in as a privileged demo user"
+        )
     headers = {"apikey": secret, "Authorization": f"Bearer {secret}", "Content-Type": "application/json"}
     results: list[SeedResult] = []
     try:
@@ -112,7 +122,7 @@ def seed_users(
             for email, role, display_name in users:
                 payload: dict[str, Any] = {
                     "email": email,
-                    "password": password,
+                    "password": judge_password if role is Role.OBSERVER and judge_password else password,
                     "email_confirm": True,
                     "app_metadata": {"anticipa_role": role.value},
                     "user_metadata": {"display_name": display_name},

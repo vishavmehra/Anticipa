@@ -69,7 +69,16 @@ class Settings(BaseSettings):
     demo_password: SecretStr | None = Field(
         None, validation_alias="ANTICIPA_DEMO_PASSWORD"
     )  # `anticipa seed-users` only
+    # Password of the shareable read-only judge login. Keep it different from ANTICIPA_DEMO_PASSWORD (the
+    # privileged demo users): the example-domain emails are public, so one shared password would let any
+    # holder of the judge password sign in as the system admin.
+    judge_password: SecretStr | None = Field(None, validation_alias="ANTICIPA_JUDGE_PASSWORD")
     profile_touch_seconds: float = Field(300.0, ge=0)  # throttle for user_profiles.last_seen_at upserts
+    # Owner decision 2026-11-12: Google sign-ins without an explicit anticipa_role get read-only observer
+    # access (synthetic data only). "" disables the fallback. Only "observer" is accepted.
+    google_default_role: str = Field(
+        "observer", validation_alias="ANTICIPA_GOOGLE_DEFAULT_ROLE", pattern="^(observer)?$"
+    )
 
     # --- integrations (health only here; adapters live in their own modules) ---
     hapi_fhir_base_url: str = Field("http://127.0.0.1:8090/fhir", validation_alias="HAPI_FHIR_BASE_URL")

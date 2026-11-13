@@ -18,11 +18,40 @@ def test_every_role_has_an_explicit_entry():
     assert set(rbac.ROLE_PERMISSIONS) == set(rbac.ROLES)
 
 
-def test_observer_holds_every_view_permission_except_the_unredacted_audit_trail():
+INTERNAL = {
+    "jobs.view",
+    "integrations.view",
+    "audit.view",
+    "audit.view_scoped",
+    "audit.view_redacted",
+    "system.configure",
+}
+
+
+def test_observer_holds_product_views_only_never_internal_backend_data():
     observer = rbac.permissions_for("observer")
-    plain_views = {p for p in rbac.ALL_PERMISSIONS if p.endswith(".view")}
-    assert observer == (plain_views - {"audit.view"}) | {"audit.view_redacted"}
-    assert "integrations.view" in observer and "audit.view" not in observer
+    product_views = {p for p in rbac.ALL_PERMISSIONS if p.endswith(".view")} - INTERNAL
+    assert observer == product_views
+    assert not observer & INTERNAL  # no jobs, integrations or audit trail (owner decision 2026-11-12)
+    assert {
+        "analytics.view",
+        "residents.view",
+        "evidence.view",
+        "engagement.view",
+        "closure.view",
+    } <= observer
+
+
+def test_internal_backend_data_is_for_system_admin_and_audit_stays_with_its_owners():
+    def holders(permission):
+        return {r for r in rbac.ROLES if rbac.has_permission(r, permission)}
+
+    assert holders("jobs.view") == {"system_admin"}
+    assert holders("integrations.view") == {"system_admin"}
+    assert holders("system.configure") == {"system_admin"}  # also gates GET /analytics/processing
+    assert holders("audit.view_redacted") == set()  # defined, held by nobody
+    assert holders("audit.view") == {"population_admin", "system_admin"}
+    assert holders("audit.view_scoped") == {"care_coordinator", "clinical_reviewer"}
 
 
 def test_observer_has_no_state_changing_permission():
@@ -30,7 +59,7 @@ def test_observer_has_no_state_changing_permission():
     assert state_changing, "expected at least one state-changing permission to exist"
     assert not rbac.permissions_for("observer") & state_changing
     for name in rbac.permissions_for("observer"):
-        assert name.endswith((".view", ".view_redacted")), name
+        assert name.endswith(".view"), name
     for forbidden in (
         "processing.execute",
         "caregaps.manage",

@@ -207,6 +207,22 @@ def test_confirmed_allocation_moves_the_case_to_planned_and_holds_a_proposed_app
     assert again.id == appt.id and not created
 
 
+def test_planning_confirm_holds_the_slot_through_the_engagement_hook(world, db_session, world_module):
+    from anticipa.planning import service as planning
+
+    case = world.case("approved_for_planning")
+    alloc = world.allocation(case, confirm=False)
+    result = planning.confirm_allocation(db_session, alloc.id, world_module.ADMIN)
+    db_session.refresh(case)
+    assert result.newly_confirmed and result.appointment_created
+    (appt,) = db_session.execute(select(Appointment).where(Appointment.care_gap_case_id == case.id)).scalars().all()
+    assert appt.appointment_status == "proposed" and appt.planned_allocation_id == alloc.id and appt.synthetic_status == "simulated"
+    assert case.status == "planned"
+    with pytest.raises(Conflict):  # a second manual hold is a duplicate; the hook itself is idempotent
+        service.create_appointment(db_session, alloc.id, "proposed", actor=world_module.ADMIN)
+    assert service.on_allocation_confirmed(db_session, alloc.id, actor=world_module.ADMIN) == (appt, False)
+
+
 def test_a_slot_that_has_started_cannot_be_booked(world, db_session, world_module):
     case = world.case("approved_for_planning")
     alloc = world.allocation(case, past=True)

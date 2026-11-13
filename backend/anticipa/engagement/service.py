@@ -27,6 +27,7 @@ from anticipa.caregaps.service import (
     _check_scope as check_case_scope,  # one assignment-scope rule for every case action
 )
 from anticipa.closure.models import CompletionEvidence
+from anticipa.consent import service as consent
 from anticipa.core import audit
 from anticipa.core.audit import Actor
 from anticipa.core.auth import CurrentUser
@@ -83,10 +84,12 @@ def draft(session: Session, case: CareGapCase, *, template_key: str | None, lang
     lang, source = select_language(language, resident.preferred_language if resident else None)
     body = render(key, lang, case.care_activity)
     template = ensure_templates(session)[(key, lang)]
+    state = consent.state_for(session, case.resident_id)  # channels the resident opted out of are not offered
     return {
         "care_gap_case_id": case.id, "resident_id": case.resident_id, "care_activity": case.care_activity,
         "template_key": key, "template_version": template.version, "language": lang, "language_source": source,
-        "direction": DIRECTION[lang], "body": body, "channels": list(CHANNELS), "constraints_checked": True,
+        "direction": DIRECTION[lang], "body": body, "channels": list(state.permitted_channels),
+        "blocked_channels": [c for c in CHANNELS if c in state.denied_channels], "constraints_checked": True,
         "simulated": True, "synthetic_status": "simulated",
         "notice": "Draft only: nothing is sent. Recording an outreach event simulates the send.",
     }  # fmt: skip
@@ -128,6 +131,8 @@ def record_event(
             f"Outreach cannot be recorded for a {case.status} case; it must be planned (capacity-confirmed) first.",
             [{"field": "status", "reason": f"allowed: {list(OUTREACH_STATUSES)}"}],
         )
+    # ADR-070: 409 (audited) if the resident opted out of this channel; before any write (commits its audit).
+    consent.check_outreach(session, case.resident_id, channel, actor=actor, case_id=case.id)
     resident = session.get(Resident, case.resident_id)
     key = template_key or DEFAULT_TEMPLATE_KEY
     lang, _ = select_language(language, resident.preferred_language if resident else None)

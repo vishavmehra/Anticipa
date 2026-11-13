@@ -95,8 +95,12 @@ class World:
         )  # fmt: skip
         self.s.add(alloc)
         self.s.flush()
-        if confirm:
-            planning.confirm_allocation(self.s, alloc.id, ADMIN)
+        if confirm and past:  # planning refuses to confirm a started slot, so plant the (stale) confirmed state directly
+            alloc.allocation_status, alloc.confirmed_at, alloc.confirmed_by = "confirmed", datetime.now(UTC), ADMIN.id
+            slot.reserved_capacity = 1
+            self.s.flush()
+        elif confirm:
+            planning.confirm_allocation(self.s, alloc.id, ADMIN, hold_appointment=False)  # seat only; tests hold the slot themselves
         return alloc
 
     def planned(self, language: str = "en", *, confirm: bool = True, status: str = "planned") -> tuple[CareGapCase, PlannedAllocation]:

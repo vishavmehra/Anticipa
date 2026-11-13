@@ -31,8 +31,6 @@ OUTCOMES = (
     "eligible", "not_eligible", "already_completed", "insufficient_evidence", "requires_clinical_review",
     "temporarily_excluded", "evaluation_error",
 )  # fmt: skip
-CLINICAL_REVIEW = ("pending_clinical_review", "clinically_reviewed")
-RULE_TYPES = ("prerequisite", "inclusion", "exclusion", "temporal")
 OUTCOME_CLASSES = ("eligible", "ineligible", "indeterminate", "error")
 REVIEW_STATUSES = ("draft", "in_review", "approved", "retired")
 CASE_STATUSES = (
@@ -93,14 +91,6 @@ def upgrade() -> None:
         _jsonb("population_scope", "{}"),
         sa.Column("disclaimer", sa.Text(), nullable=True),
         sa.Column("change_summary", sa.Text(), nullable=True),
-        sa.Column("care_activity", sa.Text(), nullable=False),
-        sa.Column("priority", sa.Text(), server_default="routine", nullable=False),
-        sa.Column("source_version", sa.Text(), nullable=True),
-        sa.Column("clinical_review_status", sa.Text(), server_default="pending_clinical_review", nullable=False),
-        _jsonb("selectors", "{}"),
-        _jsonb("decision_policy", "{}"),
-        _jsonb("sources", "[]"),
-        _jsonb("version_metadata", "{}"),
         sa.Column("content_hash", sa.Text(), nullable=True),
         sa.Column("created_by", sa.UUID(), nullable=True),
         _ts("created_at"),
@@ -117,10 +107,6 @@ def upgrade() -> None:
             name=op.f("ck_guideline_versions_effective_window"),
         ),
         sa.CheckConstraint("version >= 1", name=op.f("ck_guideline_versions_version_positive")),
-        sa.CheckConstraint(_in("priority", PRIORITIES), name=op.f("ck_guideline_versions_priority")),
-        sa.CheckConstraint(
-            _in("clinical_review_status", CLINICAL_REVIEW), name=op.f("ck_guideline_versions_clinical_review_status")
-        ),
         sa.ForeignKeyConstraint(
             ["guideline_id"], [f"{S}.guidelines.id"], name=op.f("fk_guideline_versions_guideline_id_guidelines")
         ),
@@ -134,15 +120,12 @@ def upgrade() -> None:
         _uuid_pk(),
         sa.Column("guideline_version_id", sa.UUID(), nullable=False),
         sa.Column("rule_key", sa.Text(), nullable=False),
-        sa.Column("rule_id", sa.Text(), nullable=False),
-        sa.Column("rule_type", sa.Text(), nullable=False),
-        sa.Column("precedence", sa.Integer(), nullable=False),
         sa.Column("version", sa.Integer(), server_default=sa.text("1"), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("care_activity", sa.Text(), nullable=False),
         sa.Column("priority", sa.Text(), server_default="routine", nullable=False),
-        sa.Column("rule_language", sa.Text(), server_default="anticipa-08-v1", nullable=False),
+        sa.Column("rule_language", sa.Text(), server_default="anticipa-rule-v1", nullable=False),
         sa.Column("rule_definition", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("content_hash", sa.Text(), nullable=False),
         sa.Column("input_schema_version", sa.Text(), server_default="1", nullable=False),
@@ -150,7 +133,6 @@ def upgrade() -> None:
         sa.Column("approval_status", sa.Text(), server_default="draft", nullable=False),
         _ts("created_at"),
         sa.CheckConstraint(_in("approval_status", REVIEW_STATUSES), name=op.f("ck_rule_versions_approval_status")),
-        sa.CheckConstraint(_in("rule_type", RULE_TYPES), name=op.f("ck_rule_versions_rule_type")),
         sa.ForeignKeyConstraint(
             ["guideline_version_id"],
             [f"{S}.guideline_versions.id"],
@@ -167,16 +149,12 @@ def upgrade() -> None:
         _uuid_pk(),
         sa.Column("resident_id", sa.UUID(), nullable=False),
         sa.Column("guideline_version_id", sa.UUID(), nullable=False),
-        sa.Column("rule_version_id", sa.UUID(), nullable=True),
+        sa.Column("rule_version_id", sa.UUID(), nullable=False),
         sa.Column("outcome", sa.Text(), nullable=False),
         sa.Column("outcome_class", sa.Text(), nullable=False),
-        sa.Column("reason_code", sa.Text(), nullable=True),
-        sa.Column("review_status", sa.Text(), server_default="pending_clinical_review", nullable=False),
         sa.Column("explanation", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         _jsonb("evidence_references", "[]"),
         _jsonb("missing_information", "[]"),
-        _jsonb("conflicting_information", "[]"),
-        _jsonb("source_references", "[]"),
         _jsonb("exclusion_reasons", "[]"),
         sa.Column("input_hash", sa.Text(), nullable=False),
         sa.Column("evaluation_date", sa.Date(), nullable=False),
@@ -186,7 +164,6 @@ def upgrade() -> None:
         sa.Column("synthetic_status", sa.Text(), server_default="synthetic", nullable=False),
         sa.CheckConstraint(_in("outcome", OUTCOMES), name=op.f("ck_eligibility_evaluations_outcome")),
         sa.CheckConstraint(_in("outcome_class", OUTCOME_CLASSES), name=op.f("ck_eligibility_evaluations_outcome_class")),
-        sa.CheckConstraint(_in("review_status", CLINICAL_REVIEW), name=op.f("ck_eligibility_evaluations_review_status")),
         sa.CheckConstraint(_in("synthetic_status", SYNTHETIC), name=op.f("ck_eligibility_evaluations_synthetic_status")),
         sa.ForeignKeyConstraint(
             ["resident_id"], [f"{S}.residents.id"], name=op.f("fk_eligibility_evaluations_resident_id_residents"),
@@ -205,12 +182,12 @@ def upgrade() -> None:
     )
     op.create_index(
         "ix_eligibility_evaluations_latest", "eligibility_evaluations",
-        ["guideline_version_id", "resident_id", "evaluated_at"], schema=S,
+        ["rule_version_id", "resident_id", "evaluated_at"], schema=S,
     )  # fmt: skip
     op.create_index(
         "ix_eligibility_evaluations_resident_id", "eligibility_evaluations", ["resident_id", "evaluated_at"], schema=S
     )
-    op.create_index("ix_eligibility_evaluations_outcome", "eligibility_evaluations", ["guideline_version_id", "outcome"], schema=S)
+    op.create_index("ix_eligibility_evaluations_outcome", "eligibility_evaluations", ["rule_version_id", "outcome"], schema=S)
     op.create_index("ix_eligibility_evaluations_job_id", "eligibility_evaluations", ["job_id"], schema=S)
     op.create_table(
         "care_gap_cases",
@@ -218,7 +195,7 @@ def upgrade() -> None:
         sa.Column("resident_id", sa.UUID(), nullable=False),
         sa.Column("evaluation_id", sa.UUID(), nullable=False),
         sa.Column("guideline_version_id", sa.UUID(), nullable=False),
-        sa.Column("rule_version_id", sa.UUID(), nullable=True),
+        sa.Column("rule_version_id", sa.UUID(), nullable=False),
         sa.Column("care_activity", sa.Text(), nullable=False),
         sa.Column("status", sa.Text(), server_default="identified", nullable=False),
         sa.Column("priority", sa.Text(), server_default="routine", nullable=False),
@@ -301,13 +278,11 @@ def upgrade() -> None:
 def _install_guards() -> None:
     version_content = (
         "guideline_id, version, source_reference, source_publication_date, effective_from, effective_until, "
-        "population_scope, disclaimer, change_summary, care_activity, priority, source_version, "
-        "clinical_review_status, selectors, decision_policy, sources, version_metadata, content_hash, created_by, "
-        "created_at, submitted_by, submitted_at, approved_by, approved_at"
+        "population_scope, disclaimer, change_summary, content_hash, created_by, created_at, submitted_by, "
+        "submitted_at, approved_by, approved_at"
     )
     rule_content = (
-        "guideline_version_id, rule_key, rule_id, rule_type, precedence, version, name, description, care_activity, "
-        "priority, rule_language, "
+        "guideline_version_id, rule_key, version, name, description, care_activity, priority, rule_language, "
         "rule_definition, content_hash, input_schema_version, output_schema_version, created_at"
     )
 

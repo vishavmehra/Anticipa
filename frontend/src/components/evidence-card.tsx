@@ -9,18 +9,18 @@ import type { EvidenceDetail, EvidenceFact, EvidenceSource } from "@/lib/types";
 import { useAction } from "@/lib/use-action";
 import { useApi } from "@/lib/use-api";
 import { useCan } from "./app-shell";
-import { SyntheticBadge } from "./badges";
 import { EvidenceQuote } from "./evidence-quote";
 import { GatedButton } from "./gated-button";
 import { StatusBadge } from "./status-badge";
 import { ErrorPanel, btnDanger, btnPrimary, btnSecondary, inputClass } from "./ui";
+import { displayText } from "@/lib/display";
 
 const isVerified = (s: EvidenceSource) => s.verification_status.startsWith("verified_");
 
 /** The quote on its own, with language/direction set so Arabic and Devanagari shape correctly. */
 function PlainQuote({ quote, lang }: { quote: string; lang?: string }) {
   return (
-    <blockquote lang={lang} dir={lang === "ar" ? "rtl" : "auto"} className="rounded-md border border-line bg-paper px-3 py-2 leading-7">
+    <blockquote lang={lang} dir={lang === "ar" ? "rtl" : "auto"} className="rounded-control border border-line bg-canvas px-3 py-2 leading-7">
       {quote}
     </blockquote>
   );
@@ -42,7 +42,7 @@ function DocumentQuote({ factId, src }: { factId: string; src: EvidenceSource })
   }
   if (!res.data) return <p role="status" className="text-ink-muted">Loading document context…</p>;
   const d = res.data.data;
-  const c = d.context.find((x) => x.source_id === src.id);
+  const c = (d.context ?? []).find((x) => x.source_id === src.id);
   if (!c) {
     return (
       <div className="space-y-2">
@@ -154,13 +154,12 @@ export function EvidenceCard({ fact, onReview, showResident = false }: { fact: E
   const subject =
     fact.subject_type === "family_member" ? `Relative: ${humanize(fact.relationship_type)}` : humanize(fact.subject_type);
   return (
-    <article className="rounded-md border border-line bg-surface p-4" aria-label={`${humanize(fact.fact_type)} evidence`}>
+    <article className="card p-5" aria-label={`${humanize(fact.fact_type)} evidence`}>
       <header className="mb-2 flex flex-wrap items-center gap-2">
         <h3 className="font-semibold">{humanize(fact.fact_type)}</h3>
         <span className="text-ink-muted">{humanize(fact.category)}</span>
         <StatusBadge status={fact.assertion_status} />
         <StatusBadge status={fact.validation_status} />
-        <SyntheticBadge />
       </header>
       <dl className="mb-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
         <dt className="text-ink-muted">Subject</dt>
@@ -182,14 +181,14 @@ export function EvidenceCard({ fact, onReview, showResident = false }: { fact: E
         {fact.uncertainty_note && (
           <>
             <dt className="text-ink-muted">Uncertainty</dt>
-            <dd>{fact.uncertainty_note}</dd>
+            <dd>{displayText(fact.uncertainty_note)}</dd>
           </>
         )}
         {showResident && (
           <>
             <dt className="text-ink-muted">Resident</dt>
             <dd>
-              <Link href={`/residents/${fact.resident_id}`} className="font-mono text-xs text-link underline underline-offset-2">
+              <Link href={`/residents/${fact.resident_id}`} className="font-mono text-xs text-brand-ink underline underline-offset-2">
                 {fact.resident_id.slice(0, 8)}
               </Link>
             </dd>

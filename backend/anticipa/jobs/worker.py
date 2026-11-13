@@ -76,6 +76,16 @@ class _Heartbeat(threading.Thread):
         self.join(timeout=5)
 
 
+def _refresh_analytics(sessions: sessionmaker[Session], job_type: str) -> None:
+    """Refresh the precomputed analytics after a job of an analytics relevant module; never fails the job."""
+    try:
+        from anticipa.analytics.snapshot import after_job
+
+        after_job(sessions, job_type)
+    except Exception:
+        log.exception("analytics refresh hook failed", extra={"job_type": job_type})
+
+
 def run_one(sessions: sessionmaker[Session], worker_id: str, cfg: WorkerConfig) -> bool:
     """Claim and run at most one job. Returns False when nothing was runnable."""
     with sessions() as s:
@@ -113,6 +123,7 @@ def run_one(sessions: sessionmaker[Session], worker_id: str, cfg: WorkerConfig) 
     else:
         finish(service.finish_success)
         log.info("job finished", extra=extra)
+        _refresh_analytics(sessions, job.job_type)
     finally:
         heartbeat.stop()
     return True

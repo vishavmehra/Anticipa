@@ -12,6 +12,7 @@ import { StatTile } from "@/components/stat-tile";
 import { StatusBadge } from "@/components/status-badge";
 import { Timeline, type TimelineItem } from "@/components/timeline";
 import { ErrorPanel, PageHeader, ProgressBar, btnDanger, btnPrimary, btnSecondary } from "@/components/ui";
+import { displayText } from "@/lib/display";
 
 const POLL_MS = 2000;
 const RETRYABLE = ["failed", "partially_completed", "cancelled"];
@@ -23,7 +24,7 @@ function Json({ label, value }: { label: string; value: Record<string, unknown> 
   return (
     <details className="mt-3">
       <summary className="cursor-pointer font-medium">{label}</summary>
-      <pre className="mt-1 max-h-64 overflow-auto rounded-sm border border-line bg-paper p-2 font-mono text-xs">
+      <pre className="mt-1 max-h-64 overflow-auto rounded-sm border border-line bg-canvas p-2 font-mono text-xs">
         {JSON.stringify(value, null, 2)}
       </pre>
     </details>
@@ -112,7 +113,7 @@ export function JobDetail({ id }: { id: string }) {
   return (
     <>
       <p className="mb-2">
-        <Link href="/jobs" className="text-link underline underline-offset-2">
+        <Link href="/jobs" className="text-brand-ink underline underline-offset-2">
           All jobs
         </Link>
       </p>
@@ -179,7 +180,7 @@ export function JobDetail({ id }: { id: string }) {
       {j.error_summary && (
         <div className="mb-5 rounded-md border border-danger bg-danger-bg px-4 py-3 text-danger">
           <h2 className="font-semibold">Error summary</h2>
-          <p className="mt-0.5 whitespace-pre-wrap">{j.error_summary}</p>
+          <p className="mt-0.5 whitespace-pre-wrap">{displayText(j.error_summary)}</p>
         </div>
       )}
 
@@ -192,9 +193,9 @@ export function JobDetail({ id }: { id: string }) {
           <h2 id="dt" className="mb-3 text-base font-semibold">Details</h2>
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
             <dt className="text-ink-muted">Created by</dt>
-            <dd className="font-mono text-xs leading-5">{j.created_by ?? "—"}</dd>
+            <dd className="font-mono text-xs leading-5">{j.created_by ?? "None"}</dd>
             <dt className="text-ink-muted">Config version</dt>
-            <dd>{j.config_version ?? "—"}</dd>
+            <dd>{j.config_version ?? "None"}</dd>
             <dt className="text-ink-muted">Created</dt>
             <dd className="tnum">{fmtDateTime(j.created_at)}</dd>
           </dl>

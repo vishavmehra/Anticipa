@@ -9,37 +9,15 @@ import uuid
 from datetime import datetime
 
 import pytest
-from fastapi import FastAPI, Request
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from anticipa.api.errors import install_exception_handlers
-from anticipa.api.middleware import RequestContextMiddleware
-from anticipa.core.auth import CurrentUser, get_current_user
 from anticipa.core.models import AuditEvent
-from anticipa.planning import routes, service
+from anticipa.planning import service
 from anticipa.planning.models import CapacitySlot, PlannedAllocation
 
 pytestmark = pytest.mark.integration
 ADMIN, OBSERVER, COORD = {"x-test-role": "population_admin"}, {"x-test-role": "observer"}, {"x-test-role": "care_coordinator"}
 PERIOD = {"start": "2026-11-10T00:00:00Z", "end": "2026-11-17T00:00:00Z"}
-
-
-@pytest.fixture
-def client(sessions):
-    app = FastAPI()
-    app.state.sessionmaker = sessions
-    install_exception_handlers(app)
-    app.add_middleware(RequestContextMiddleware)
-    app.include_router(routes.router, prefix="/api/v1")
-
-    def fake_user(request: Request) -> CurrentUser:
-        role = request.headers.get("x-test-role", "population_admin")
-        return CurrentUser(uuid.uuid5(uuid.NAMESPACE_DNS, role), f"{role}@example.test", role)
-
-    app.dependency_overrides[get_current_user] = fake_user
-    with TestClient(app, raise_server_exceptions=False) as c:
-        yield c
 
 
 def run_and_wait(client, sessions, **body):
@@ -139,7 +117,7 @@ def test_confirmation_revalidates_the_slot(client, sessions, seed_world):
     r = client.post(url.format(a1.id), headers=ADMIN)
     assert r.status_code == 200, r.text
     out = r.json()["data"]
-    assert out["newly_confirmed"] and out["allocation"]["allocation_status"] == "confirmed" and out["appointment_created"] is False
+    assert out["newly_confirmed"] and out["allocation"]["allocation_status"] == "confirmed" and out["appointment_created"] is True
     with sessions() as s:
         assert s.get(CapacitySlot, slot_id).reserved_capacity == before + 1
     assert client.post(url.format(a1.id), headers=ADMIN).json()["data"]["newly_confirmed"] is False  # idempotent, no double reserve

@@ -29,6 +29,7 @@ REASON_CODES = (
     "no_capacity_in_horizon",
     "capacity_exhausted",
     "resident_time_conflict",
+    "consent_denied",  # the resident opted out of every outreach channel (ADR-070): not planned, not an error
 )  # fmt: skip
 
 EquityDimension = Literal["district", "language"]
@@ -97,6 +98,7 @@ class PlannableCase:
     district_code: str
     language: str = "unknown"
     opened_at: datetime | None = None
+    consent_denied: bool = False  # every outreach channel denied: left unallocated, never given a seat
 
 
 @dataclass(frozen=True, slots=True)

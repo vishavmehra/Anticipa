@@ -1,5 +1,6 @@
 "use client";
 
+import { selectClass } from "@/components/ui";
 import Link from "next/link";
 import { useState } from "react";
 import { api, apiList, apiPost } from "@/lib/api";
@@ -12,6 +13,7 @@ import { DataTable, type Column } from "@/components/data-table";
 import { GatedButton } from "@/components/gated-button";
 import { StatusBadge } from "@/components/status-badge";
 import { ErrorPanel, Facts, PageHeader, Section, btnPrimary, btnSecondary } from "@/components/ui";
+import { displayText } from "@/lib/display";
 
 function ApproveCell({ guidelineId, version, onDone }: { guidelineId: string; version: GuidelineVersion; onDone: () => void }) {
   const [confirm, setConfirm] = useState(false);
@@ -52,7 +54,7 @@ const ruleCols: Column<Rule>[] = [
     cell: (r) => (
       <>
         <p className="font-medium">{r.name}</p>
-        {r.description && <p className="text-xs text-ink-muted">{r.description}</p>}
+        {r.description && <p className="text-xs text-ink-muted">{displayText(r.description)}</p>}
         <p className="font-mono text-xs text-ink-muted">{r.rule_key}</p>
       </>
     ),
@@ -86,7 +88,7 @@ export function GuidelineDetailView({ id }: { id: string }) {
   const [picked, setPicked] = useState<string | null>(null);
   const back = (
     <p className="mb-2">
-      <Link href="/guidelines" className="text-link underline underline-offset-2">
+      <Link href="/guidelines" className="text-brand-ink underline underline-offset-2">
         All guidelines
       </Link>
     </p>
@@ -109,23 +111,24 @@ export function GuidelineDetailView({ id }: { id: string }) {
   const versionCols: Column<GuidelineVersion>[] = [
     { key: "v", header: "Version", align: "right", cell: (v) => <span className="font-medium">v{v.version}</span> },
     { key: "s", header: "Review state", cell: (v) => <StatusBadge status={v.review_status} /> },
+    { key: "clin", header: "Clinical review", cell: (v) => humanize(v.clinical_review_status) },
     { key: "src", header: "Source reference", cell: (v) => v.source_reference ?? <span className="text-ink-muted">Not recorded</span> },
     { key: "pub", header: "Published", className: "whitespace-nowrap tnum", cell: (v) => fmtDate(v.source_publication_date) },
     { key: "eff", header: "Effective from", className: "whitespace-nowrap tnum", cell: (v) => fmtDate(v.effective_from) },
-    { key: "appr", header: "Approved", className: "whitespace-nowrap tnum", cell: (v) => (v.approved_at ? fmtDateTime(v.approved_at) : "—") },
+    { key: "appr", header: "Approved", className: "whitespace-nowrap tnum", cell: (v) => (v.approved_at ? fmtDateTime(v.approved_at) : "None") },
     { key: "act", header: "Action", cell: (v) => <ApproveCell guidelineId={id} version={v} onDone={g.reload} /> },
   ];
 
   return (
     <>
       {back}
-      <PageHeader title={d.name} description={d.description ?? undefined} />
+      <PageHeader title={d.name} description={d.description ? displayText(d.description) : undefined} />
       <Section id="about" title="About">
         <Facts
           items={[
             ["Topic", d.topic],
             ["Authoritative source", d.authoritative_source],
-            ["Source link", d.source_url ? <a key="u" href={d.source_url} rel="noreferrer noopener" target="_blank" className="text-link underline underline-offset-2 break-all">{d.source_url}</a> : null],
+            ["Source link", d.source_url ? (/^https?:\/\//i.test(d.source_url) ? <a key="u" href={d.source_url} rel="noreferrer noopener" target="_blank" className="text-brand-ink underline underline-offset-2 break-all">{d.source_url}</a> : <span key="u" className="break-all">{d.source_url}</span>) : null],
             ["Key", <span key="k" className="font-mono text-xs">{d.guideline_key}</span>],
             ["Updated", fmtDateTime(d.updated_at)],
           ]}
@@ -142,7 +145,7 @@ export function GuidelineDetailView({ id }: { id: string }) {
           emptyTitle="No versions yet"
           emptyHint="A version records the source reference and criteria. It must be approved before its rules can raise care gaps."
         />
-        {versions.some((v) => v.disclaimer) && <p className="mt-2 max-w-[65ch] text-ink-muted">{versions.find((v) => v.disclaimer)?.disclaimer}</p>}
+        {versions.some((v) => v.disclaimer) && <p className="mt-2 max-w-[65ch] text-ink-muted">{displayText(versions.find((v) => v.disclaimer)?.disclaimer)}</p>}
       </Section>
       {versionId && (
         <Section
@@ -158,7 +161,7 @@ export function GuidelineDetailView({ id }: { id: string }) {
                   id="rule-version"
                   value={versionId}
                   onChange={(e) => setPicked(e.target.value)}
-                  className="min-h-9 rounded-sm border border-line-strong bg-surface px-2.5 text-sm text-ink"
+                  className={selectClass}
                 >
                   {versions.map((v) => (
                     <option key={v.id} value={v.id}>

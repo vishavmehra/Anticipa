@@ -5,7 +5,7 @@ import { useState } from "react";
 import { api, apiList, apiPost } from "@/lib/api";
 import { fmtDateTime, fmtInt, fmtPct, humanize } from "@/lib/format";
 import { PERM } from "@/lib/nav";
-import type { Allocation, ConfirmResult, GroupMetrics, PlanningRun, Unallocated } from "@/lib/types";
+import type { Allocation, ConfirmResult, GroupMetrics, PlanningRun, RunMetrics, Unallocated } from "@/lib/types";
 import { useAction } from "@/lib/use-action";
 import { useApi } from "@/lib/use-api";
 import { SimulatedBadge } from "@/components/badges";
@@ -14,6 +14,7 @@ import { GatedButton } from "@/components/gated-button";
 import { StatTile } from "@/components/stat-tile";
 import { StatusBadge } from "@/components/status-badge";
 import { AsyncBlock, ErrorPanel, Notice, Section, btnPrimary } from "@/components/ui";
+import { displayText } from "@/lib/display";
 
 type Group = { key: string } & GroupMetrics;
 const groupCols = (label: string): Column<Group>[] => [
@@ -35,16 +36,16 @@ export function RunPanel({ runId }: { runId: string }) {
     apiList<Unallocated>(`/planning/runs/${runId}/unallocated`, { page: upage, page_size: 25 }, signal),
   );
   const confirm = useAction();
-  const [confirmed, setConfirmed] = useState(false);
+  const [confirmed, setConfirmed] = useState<ConfirmResult | null>(null);
   const r = run.data?.data;
-  const m = r?.metrics;
+  const m = r?.metrics as RunMetrics | undefined;
 
   const allocCols: Column<Allocation>[] = [
     {
       key: "case",
       header: "Case",
       cell: (a) => (
-        <Link href={`/care-gaps/${a.care_gap_case_id}`} className="font-mono text-xs text-link underline underline-offset-2">
+        <Link href={`/care-gaps/${a.care_gap_case_id}`} className="font-mono text-xs text-brand-ink underline underline-offset-2">
           {a.care_gap_case_id.slice(0, 8)}
         </Link>
       ),
@@ -73,9 +74,14 @@ export function RunPanel({ runId }: { runId: string }) {
             className={btnPrimary}
             disabled={confirm.pending}
             onClick={async () => {
-              setConfirmed(false);
-              if (await confirm.run(() => apiPost<ConfirmResult>(`/planning/allocations/${a.id}/confirm`))) {
-                setConfirmed(true);
+              setConfirmed(null);
+              let result: ConfirmResult | null = null;
+              if (
+                await confirm.run(async () => {
+                  result = (await apiPost<ConfirmResult>(`/planning/allocations/${a.id}/confirm`)).data;
+                })
+              ) {
+                setConfirmed(result);
                 allocs.reload();
               }
             }}
@@ -93,21 +99,21 @@ export function RunPanel({ runId }: { runId: string }) {
       key: "case",
       header: "Case",
       cell: (u) => (
-        <Link href={`/care-gaps/${u.care_gap_case_id}`} className="font-mono text-xs text-link underline underline-offset-2">
+        <Link href={`/care-gaps/${u.care_gap_case_id}`} className="font-mono text-xs text-brand-ink underline underline-offset-2">
           {u.care_gap_case_id.slice(0, 8)}
         </Link>
       ),
     },
     { key: "reason", header: "Reason", cell: (u) => <span className="font-medium">{humanize(u.reason_code)}</span> },
-    { key: "why", header: "Explanation", cell: (u) => u.explanation },
-    { key: "district", header: "District", cell: (u) => u.district_code ?? "—" },
-    { key: "lang", header: "Language", cell: (u) => u.language ?? "—" },
+    { key: "why", header: "Explanation", cell: (u) => displayText(u.explanation) },
+    { key: "district", header: "District", cell: (u) => u.district_code ?? "None" },
+    { key: "lang", header: "Language", cell: (u) => u.language ?? "None" },
   ];
 
   const ameta = allocs.data?.meta;
   const umeta = unalloc.data?.meta;
   return (
-    <div id="run-panel" className="mt-4 space-y-5 rounded-md border border-line-strong bg-paper p-4">
+    <div id="run-panel" className="card mt-4 space-y-5 p-5">
       <h3 className="text-base font-semibold">
         Run <span className="font-mono text-sm">{runId.slice(0, 8)}</span>
       </h3>
@@ -142,7 +148,7 @@ export function RunPanel({ runId }: { runId: string }) {
           <p className="mb-2 max-w-[65ch] text-ink-muted">
             Coverage is allocated cases divided by cases needing a slot in each group, so gaps between groups are visible.
           </p>
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div className="grid gap-4 lg:grid-cols-2 [&>*]:min-w-0">
             <DataTable caption="Coverage by district" columns={groupCols("District")} rows={groups(m?.by_district)} getRowId={(g) => g.key} loading={false} error={null} />
             <DataTable caption="Coverage by language" columns={groupCols("Language")} rows={groups(m?.by_language)} getRowId={(g) => g.key} loading={false} error={null} />
           </div>
@@ -169,7 +175,12 @@ export function RunPanel({ runId }: { runId: string }) {
       </Section>
 
       <Section id="allocs" title="Proposed allocations">
-        {confirmed && <Notice tone="ok">Allocation confirmed. A seat is reserved (simulated). No appointment has been created.</Notice>}
+        {confirmed && (
+          <Notice tone="ok">
+            {confirmed.newly_confirmed ? "Allocation confirmed." : "This allocation was already confirmed."} A seat is reserved.{" "}
+            {confirmed.appointment_created ? "A simulated appointment now holds the slot for the case." : "No new appointment was created."}
+          </Notice>
+        )}
         {confirm.error && (
           <div className="mb-2">
             <ErrorPanel error={confirm.error} title="The allocation was not confirmed" />

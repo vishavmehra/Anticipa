@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any
 
 from .cache import ResponseCache
-from .config import RouterConfig, load_config
+from .config import Candidate, RouterConfig, load_config
 from .router import ModelRouter
 from .sinks import InMemorySink, InvocationSink
 from .types import AdapterResponse, RouterError, Usage
@@ -53,6 +53,21 @@ def err(category: str, **kw: Any) -> RouterError:
     return RouterError(category, f"scripted {category}", **kw)  # type: ignore[arg-type]
 
 
+def two_provider_config() -> RouterConfig:
+    """Shipped models.toml with `evidence.extract` re-pointed at Nebius -> Haiku. The shipped route is
+    Haiku-only
+    (no Nebius unless opted in), so tests of router MECHANICS (fallback, retries, repair, budget) use
+    this one."""
+    cfg = load_config()
+    route = cfg.tasks["evidence.extract"]
+    route.candidates = [
+        Candidate(provider="nebius", model_id="Qwen/Qwen3-235B-A22B-Instruct-2507"),
+        Candidate(provider="anthropic", model_id="claude-haiku-5-5"),
+    ]
+    route.temperature = 0.0
+    return cfg
+
+
 def make_test_router(
     adapters: dict[str, Any],
     *,
@@ -60,6 +75,9 @@ def make_test_router(
     cache: ResponseCache | None = None,
     sink: InvocationSink | None = None,
     daily_budget_usd: Decimal | None = None,
+    run_budget_usd: Decimal | None = None,
+    enabled_providers: frozenset[str] | None = None,
+    provider_credit_usd: dict[str, Decimal] | None = None,
 ) -> tuple[ModelRouter, Any, list[float]]:
     """Router over the real models.toml routes with scripted adapters: (router, sink, sleeps)."""
     sleeps: list[float] = []
@@ -76,5 +94,8 @@ def make_test_router(
         sleep=fake_sleep,
         jitter=lambda: 1.0,
         daily_budget_usd=daily_budget_usd,
+        run_budget_usd=run_budget_usd,
+        enabled_providers=enabled_providers,
+        provider_credit_usd=provider_credit_usd,
     )
     return router, sink, sleeps

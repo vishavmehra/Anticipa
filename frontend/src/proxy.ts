@@ -28,7 +28,7 @@ export async function proxy(request: NextRequest) {
   if (hasSession) {
     // Triggers the refresh. A network/verification error leaves the cookies as they are.
     await supabase.auth.getClaims().catch(() => undefined);
-  } else if (request.nextUrl.pathname !== "/login" && !request.nextUrl.pathname.startsWith("/dev/")) {
+  } else if (request.nextUrl.pathname !== "/login" && !request.nextUrl.pathname.startsWith("/dev/") && !request.nextUrl.pathname.startsWith("/auth/")) {
     const login = request.nextUrl.clone();
     login.pathname = "/login";
     login.search = `?next=${encodeURIComponent(request.nextUrl.pathname + request.nextUrl.search)}`;

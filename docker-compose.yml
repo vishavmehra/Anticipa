@@ -41,7 +41,7 @@ services:
       SPRING_DATASOURCE_DRIVERCLASSNAME: org.postgresql.Driver
       SPRING_JPA_PROPERTIES_HIBERNATE_DIALECT: ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect
       HAPI_FHIR_FHIR_VERSION: R4
-      JAVA_TOOL_OPTIONS: -Xms256m -Xmx1536m
+      JAVA_TOOL_OPTIONS: ${HAPI_JAVA_TOOL_OPTIONS:--Xms256m -Xmx1536m} # override on a tight laptop, e.g. -Xmx1024m
     healthcheck:
       test: ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/fhir/metadata?_summary=true"]
       interval: 15s

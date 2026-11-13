@@ -1,72 +1,587 @@
 @import "tailwindcss";
 
-/* Design tokens live here (this file is the source of truth). Chromatic colour is reserved for status and
-   the "not real" (specimen) semantic; the brand itself is near-monochrome spruce + ink. State pairs are AA
-   (>= 4.5:1 fg on bg); the specimen hatch is always paired with a text label. */
+/*
+ * ANTICIPA DESIGN SYSTEM (source of truth; DESIGN.md is local documentation only).
+ * Direction (owner references, 2026-11-12): lavender glass over a soft layered background, serif display headlines with
+ * a purple eyebrow, purple gradient pills for the primary action, thin icon-led navigation, semantic green / amber / red
+ * only for priority and status. Glass is refined, not decorative: translucent cards with one blur layer each, dense data
+ * on more opaque glass, solid fallbacks where blur is unavailable.
+ *
+ * PUBLISHED FOR OTHER AGENTS (use these, do not invent parallel ones)
+ *   Colour tokens (Tailwind classes bg-*, text-*, border-*):
+ *     canvas, surface, line, line-strong, ink, ink-soft, ink-muted,
+ *     brand, brand-hover, brand-soft, brand-ink, brand-mid, brand-light   (purple family)
+ *     navy, navy-2, navy-line, navy-text, navy-muted                      (deep violet, login hero only)
+ *     tint-teal|rose|blue|amber|violet|green (+ matching icon-teal|rose|blue|amber|violet|green),
+ *     ok, warn, danger, info, neutral (+ -bg and -line variants), specimen, specimen-bg, mark
+ *   Shape tokens: rounded-card (18px), rounded-control (12px), shadow-card, shadow-pop
+ *   Type: font-sans (Inter), font-display (serif, headlines and large figures), font-mono
+ *   GLASS utilities (published, use these instead of ad hoc bg-white/60):
+ *     .glass-card / .glass-card-strong   elevated rim, two layer shadow, hover lift (aliases of .glass and .glass-strong)
+ *     Theme modes: <html data-theme="light|dark|clinical">; chart colours read --chart-* and --scale-* tokens
+ *     .icon-tile (+ -ok|warn|danger|info|teal|rose|blue|amber|green|neutral)   glass tile for an icon; use <IconTile name size tone>
+ *     .glass         translucent card, blur 14px, 1px edge + inner highlight (the default surface; alias .card)
+ *     .glass-strong  90% opaque, NO blur: tables, forms, dense data, anything that scrolls
+ *     .glass-bar     translucent bar (top bar, sticky headers), blur 18px; .glass-side is the same for the sidebar
+ *     .tile          flat nested surface inside a card (never blurs; nested .card and .glass drop their blur automatically)
+ *     .glass-pop     menus and tooltips (opaque, shadow-pop)
+ *     Fallbacks built in: @supports not (backdrop-filter) and prefers-reduced-transparency become solid surfaces.
+ *   Other utilities: .eyebrow (purple uppercase label), .grad-brand (primary gradient fill, white text), .grad-brand-soft,
+ *     .tnum, .skeleton, .hatch, .on-navy, .select-arrow, .scroll-quiet
+ *   Components in src/components/ui (import from "@/components/ui"):
+ *     Card, CardHeader, KpiTile, Pill, PriorityPill, DataLabel (Live / Evaluation; Simulated only on outreach and bookings),
+ *     PillTabs, FilterBar, Eyebrow, btn, btnPrimary, btnSecondary, btnGhost, btnDanger, inputClass, selectClass,
+ *     PageHeader (eyebrow, crumbs, tabs), Section, Facts, EmptyState, ErrorPanel, Unavailable, AsyncBlock, Pager, ProgressBar, JsonBlock, Notice,
+ *     Donut, AreaTrend, BarList, ColumnPairs, ChartTable, Sparkline, Gauge, FunnelBars, Cartogram, StackedBar,
+ *     Icon (named lucide icons), and from src/components: DataTable, Timeline, EvidenceQuote, GatedButton, Brand.
+ * Contrast: every text/background pair is >= 4.5:1 on the lightest and darkest point of the page background;
+ * chart marks >= 3:1 on white (validated with the dataviz script).
+ */
 @theme {
-  --color-paper: #f1f4f5;
+  --color-canvas: #f4f0fc;
   --color-surface: #ffffff;
-  --color-line: #d3dbdf;
-  --color-line-strong: #7f8f97;
-  --color-ink: #13262e;
-  --color-ink-muted: #4a5c65;
-  --color-spruce: #12303a;
-  --color-spruce-hover: #1d4453;
-  --color-link: #0b6475;
+  --color-line: #e4dcf6;
+  --color-line-strong: #8d82b3; /* control borders: 3.5:1 on white */
+  --color-ink: #1a1245;
+  --color-ink-soft: #3b3463;
+  --color-ink-muted: #5b5480; /* 6.9:1 on white, 6.2:1 on canvas */
 
-  --color-ok: #14582d;
-  --color-ok-bg: #e1f1e6;
-  --color-warn: #6b4300;
-  --color-warn-bg: #fcebc5;
-  --color-danger: #9b1c1c;
-  --color-danger-bg: #fbe3e1;
-  --color-info: #164e8a;
-  --color-info-bg: #e1ecf8;
-  --color-neutral: #3f505a;
-  --color-neutral-bg: #e6ebed;
-  --color-specimen: #3b2570;
-  --color-specimen-bg: #ece6f7;
+  /* Deep violet: login hero and tooltips only. */
+  --color-navy: #2b1b66;
+  --color-navy-2: #3b2a85;
+  --color-navy-line: #4c3b9a;
+  --color-navy-text: #ece7fb;
+  --color-navy-muted: #b9acea;
+
+  --color-brand: #5b3fb8; /* 7.4:1 against white text */
+  --color-brand-hover: #4a2f9f;
+  --color-brand-soft: #ece6fb;
+  --color-brand-ink: #4a2f9f;
+  --color-brand-mid: #8264dc; /* chart and decorative fills, 4.4:1 on white */
+  --color-brand-light: #c9baf2; /* tracks and soft fills, decorative only */
+
+  --color-tint-teal: #e2f3f1;
+  --color-tint-rose: #fdebee;
+  --color-tint-blue: #e8eefc;
+  --color-tint-amber: #fdf0d8;
+  --color-tint-violet: #efe9fc;
+  --color-tint-green: #e3f5ea;
+  --color-icon-teal: #0f766e;
+  --color-icon-rose: #b42318;
+  --color-icon-blue: #1d4ed8;
+  --color-icon-amber: #8a5206;
+  --color-icon-violet: #5b3fb8;
+  --color-icon-green: #067647;
+
+  --color-ok: #05603a;
+  --color-ok-bg: #d9f5e3;
+  --color-ok-line: #9edbb8;
+  --color-warn: #7a4a05;
+  --color-warn-bg: #fdecc4;
+  --color-warn-line: #ecc56c;
+  --color-danger: #b42318;
+  --color-danger-bg: #fde3e1;
+  --color-danger-line: #f3a9a3;
+  --color-info: #1849a9;
+  --color-info-bg: #dce9fd;
+  --color-info-line: #a2c1f3;
+  --color-neutral: #3b3463;
+  --color-neutral-bg: #ebe6f6;
+  --color-neutral-line: #cfc6e6;
+
+  --color-specimen: #4a2d99;
+  --color-specimen-bg: #efeafc;
   --color-mark: #ffe08a;
 
-  --radius-sm: 3px;
-  --radius-md: 5px;
+  /* legacy aliases from earlier passes (still referenced by components/features); prefer the names above */
+  --color-paper: #f4f0fc;
+  --color-spruce: #2b1b66;
+  --color-spruce-hover: #3b2a85;
+  --color-link: #4a2f9f;
+
+  --radius-card: 1.375rem;
+  --radius-control: 0.75rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+
+  --shadow-card: inset 1px 1px 0 var(--glass-hi), inset -1px -1px 0 var(--glass-lo), 0 1px 2px var(--glass-contact), 0 16px 36px -14px var(--glass-diffuse);
+  --shadow-card-hover: inset 1px 1px 0 var(--glass-hi), inset -1px -1px 0 var(--glass-lo), 0 2px 4px var(--glass-contact), 0 24px 44px -14px var(--glass-diffuse);
+  --shadow-pop: 0 14px 38px -8px rgb(43 27 102 / 0.28);
 }
 
 @theme inline {
-  --font-sans: var(--font-plex), var(--font-plex-arabic), var(--font-plex-deva), ui-sans-serif,
-    system-ui, sans-serif;
+  --font-sans: var(--font-inter), var(--font-plex-arabic), var(--font-plex-deva), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-display-serif), "Source Serif 4", Georgia, "Times New Roman", serif;
   --font-mono: var(--font-plex-mono), ui-monospace, "Cascadia Mono", monospace;
 }
 
 :root {
   color-scheme: light;
-  --banner-h: 2.25rem;
+  --banner-h: 0rem; /* no top banner (owner decision); kept so existing offsets still resolve */
+  --sidebar-w: 4.75rem;
+  --topbar-h: 4.25rem;
+
+  --glass-bg: rgb(255 255 255 / 0.66);
+  --glass-bg-strong: rgb(255 255 255 / 0.9);
+  --glass-edge: rgb(112 84 196 / 0.16);
+  --glass-hi: rgb(255 255 255 / 0.62); /* top and left inner highlight */
+  --glass-lo: rgb(76 50 160 / 0.07); /* bottom and right inner shade */
+  --glass-contact: rgb(43 27 102 / 0.07);
+  --glass-diffuse: rgb(76 50 160 / 0.24);
+  --glass-blur: 14px;
+  --bar-bg: rgb(255 255 255 / 0.58);
+  --side-bg: rgb(255 255 255 / 0.46);
+  --tile-bg: rgb(255 255 255 / 0.74);
+  --pop-bg: rgb(255 255 255 / 0.97);
+  --control-bg: rgb(255 255 255 / 0.85);
+  --page-glow-1: rgb(176 150 250 / 0.34);
+  --page-glow-2: rgb(204 188 252 / 0.4);
+  --page-glow-3: rgb(222 190 252 / 0.3);
+  --page-glow-4: rgb(188 214 252 / 0.24);
+  --tile-from: #ffffff;
+  --tile-edge: rgb(255 255 255 / 0.95);
+  --page-top: #f8f5fe;
+  --page-bottom: #efe9fb;
+
+  /* chart tokens: every chart mark and track reads these, so each theme re-colours charts */
+  --chart-teal: #6246c7;
+  --chart-teal-dark: #4a2f9f;
+  --chart-blue: #2f6fdd;
+  --chart-red: #dc2626;
+  --chart-amber: #ca8a04;
+  --chart-green: #0f8a4b;
+  --chart-navy: #2b1b66;
+  --chart-violet: #5b3fb8;
+  --chart-mid: #8264dc;
+  --chart-light: #c9baf2;
+  --chart-grid: #e4dcf6;
+  --chart-axis: #5b5480;
+  --chart-track: #e9e2f8;
+  --chart-empty: #ebe6f6;
+  --scale-1: #4a2f9f;
+  --scale-2: #6246c7;
+  --scale-3: #7656d6;
+  --scale-4: #b3a0ec;
+  --scale-5: #dcd2f7;
+  --grad-brand: linear-gradient(135deg, #7152d3 0%, #4f33a8 100%);
+  --grad-brand-soft: linear-gradient(135deg, #f1ecfd 0%, #e4daf9 100%);
 }
 
 body {
-  background: var(--color-paper);
+  background: var(--color-canvas);
   color: var(--color-ink);
   font-family: var(--font-sans);
   font-size: 0.875rem;
-  line-height: 1.5;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  font-feature-settings: "cv11", "ss01";
+}
+
+/* Soft layered background on a fixed pseudo element: no background-attachment: fixed repaint on scroll. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(56rem 38rem at 6% -8%, var(--page-glow-1), transparent 62%),
+    radial-gradient(46rem 34rem at 98% 2%, var(--page-glow-2), transparent 58%),
+    radial-gradient(40rem 30rem at 84% 104%, var(--page-glow-3), transparent 62%),
+    radial-gradient(34rem 26rem at 4% 96%, var(--page-glow-4), transparent 62%),
+    linear-gradient(180deg, var(--page-top) 0%, var(--page-bottom) 100%);
+}
+
+h1,
+h2,
+h3 {
+  letter-spacing: -0.012em;
 }
 
 :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
-  outline: 2px solid var(--color-link);
+  outline: 2px solid var(--color-brand);
   outline-offset: 2px;
 }
+.on-navy :focus-visible,
 .on-spruce :focus-visible {
-  outline-color: #8fd3e3;
+  outline-color: #d4c8fb;
 }
 
-/* Diagonal hatch = "specimen": synthetic/simulated content. Pattern + text, never colour alone. */
+@layer components {
+  .select-arrow {
+    appearance: none;
+    background-repeat: no-repeat;
+    background-size: 1rem;
+    background-position: right 0.65rem center;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235b5480' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  }
+
+  /* ---- glass ---- */
+  .glass,
+  .glass-card,
+  .card {
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.35);
+    backdrop-filter: blur(var(--glass-blur)) saturate(1.35);
+    border: 1px solid var(--glass-edge);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-card);
+  }
+  .glass-strong,
+  .glass-card-strong {
+    background: var(--glass-bg-strong);
+    border: 1px solid var(--glass-edge);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-card);
+  }
+  .glass-bar {
+    background: var(--bar-bg);
+    -webkit-backdrop-filter: blur(18px) saturate(1.4);
+    backdrop-filter: blur(18px) saturate(1.4);
+    border-bottom: 1px solid var(--glass-edge);
+  }
+  .glass-side {
+    background: var(--side-bg);
+    -webkit-backdrop-filter: blur(18px) saturate(1.4);
+    backdrop-filter: blur(18px) saturate(1.4);
+    border-right: 1px solid var(--glass-edge);
+  }
+  .glass-pop {
+    background: var(--pop-bg);
+    border: 1px solid var(--glass-edge);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-pop);
+  }
+  .tile {
+    background: var(--tile-bg);
+    border: 1px solid rgb(112 84 196 / 0.1);
+    border-radius: var(--radius-control);
+  }
+  /* One blur layer per stack: anything glass inside glass is flat. */
+  .glass .glass,
+  .glass .card,
+  .card .card,
+  .card .glass,
+  .glass-bar .glass,
+  .glass-bar .card {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: var(--tile-bg);
+    box-shadow: none;
+  }
+  /* The sticky chrome never blurs content that scrolls under tables. */
+  .glass-strong .card,
+  .glass-strong .glass {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .glass-card,
+    .card {
+      transition: transform 200ms ease, box-shadow 200ms ease;
+    }
+    .glass-card:hover,
+    .card:hover {
+      transform: translateY(-2px);
+      box-shadow: var(--shadow-card-hover);
+    }
+    /* a card inside a card, or a card that scrolls its content, does not lift */
+    .card .card:hover,
+    .glass-strong .card:hover {
+      transform: none;
+      box-shadow: none;
+    }
+  }
+
+  /* ---- icon tile: the single glass tile that holds an icon ---- */
+  .icon-tile {
+    display: grid;
+    flex-shrink: 0;
+    place-items: center;
+    border-radius: 30%;
+    color: var(--color-brand-ink);
+    background: linear-gradient(180deg, var(--tile-from), var(--tile-to, var(--color-brand-soft)));
+    border: 1px solid var(--tile-edge);
+    box-shadow: 0 1px 2px var(--glass-contact), 0 8px 14px -8px var(--glass-diffuse), inset 0 1px 0 rgb(255 255 255 / 0.7);
+  }
+  .icon-tile-ok { --tile-to: var(--color-ok-bg); color: var(--color-ok); }
+  .icon-tile-warn { --tile-to: var(--color-warn-bg); color: var(--color-warn); }
+  .icon-tile-danger { --tile-to: var(--color-danger-bg); color: var(--color-danger); }
+  .icon-tile-info { --tile-to: var(--color-info-bg); color: var(--color-info); }
+  .icon-tile-neutral { --tile-to: var(--color-neutral-bg); color: var(--color-neutral); }
+  .icon-tile-teal { --tile-to: var(--color-tint-teal); color: var(--color-icon-teal); }
+  .icon-tile-rose { --tile-to: var(--color-tint-rose); color: var(--color-icon-rose); }
+  .icon-tile-blue { --tile-to: var(--color-tint-blue); color: var(--color-icon-blue); }
+  .icon-tile-amber { --tile-to: var(--color-tint-amber); color: var(--color-icon-amber); }
+  .icon-tile-green { --tile-to: var(--color-tint-green); color: var(--color-icon-green); }
+
+  .eyebrow {
+    font-size: 0.75rem;
+    line-height: 1rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--color-brand-ink);
+  }
+  .grad-brand {
+    background: var(--grad-brand);
+    color: #fff;
+  }
+  .grad-brand-soft {
+    background: var(--grad-brand-soft);
+  }
+  .scroll-quiet {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(112 84 196 / 0.35) transparent;
+  }
+}
+
+/* ---- theme modes: light (default, above), dark and clinical. Set on <html data-theme>. All text pairs stay >= 4.5:1. ---- */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-canvas: #0b1026;
+  --color-surface: #131a3d;
+  --color-line: #2b3470;
+  --color-line-strong: #7480c4;
+  --color-ink: #eef0ff;
+  --color-ink-soft: #cdd2f2;
+  --color-ink-muted: #a3acdc;
+  --color-brand: #8b7bf0;
+  --color-brand-hover: #a395f5;
+  --color-brand-soft: #262b66;
+  --color-brand-ink: #c9c0ff;
+  --color-brand-mid: #8b7bf0;
+  --color-brand-light: #4a4f9a;
+  --color-tint-teal: #12363a;
+  --color-tint-rose: #3d1a24;
+  --color-tint-blue: #172a57;
+  --color-tint-amber: #3a2c10;
+  --color-tint-violet: #262b66;
+  --color-tint-green: #123a28;
+  --color-icon-teal: #5ee0d0;
+  --color-icon-rose: #ff9aa8;
+  --color-icon-blue: #8db4ff;
+  --color-icon-amber: #f5c76a;
+  --color-icon-violet: #c9c0ff;
+  --color-icon-green: #6ee7a8;
+  --color-ok: #6ee7a8;
+  --color-ok-bg: #0f3a28;
+  --color-ok-line: #1f6b4a;
+  --color-warn: #f5c76a;
+  --color-warn-bg: #3a2c10;
+  --color-warn-line: #7a5a1a;
+  --color-danger: #ff9a90;
+  --color-danger-bg: #4a1a18;
+  --color-danger-line: #8a3a34;
+  --color-info: #9ec1ff;
+  --color-info-bg: #14284d;
+  --color-info-line: #2f4f8f;
+  --color-neutral: #cdd2f2;
+  --color-neutral-bg: #232a5c;
+  --color-neutral-line: #3a4388;
+  --color-specimen: #c9c0ff;
+  --color-specimen-bg: #262b66;
+  --color-mark: #5c4a00;
+  --glass-bg: rgb(26 33 82 / 0.58);
+  --glass-bg-strong: rgb(19 26 61 / 0.93);
+  --glass-edge: rgb(150 160 255 / 0.28);
+  --glass-hi: rgb(190 198 255 / 0.22);
+  --glass-lo: rgb(0 0 0 / 0.28);
+  --glass-contact: rgb(0 0 0 / 0.35);
+  --glass-diffuse: rgb(60 50 180 / 0.45);
+  --bar-bg: rgb(15 20 52 / 0.62);
+  --side-bg: rgb(12 17 44 / 0.55);
+  --tile-bg: rgb(36 44 100 / 0.5);
+  --pop-bg: rgb(19 26 61 / 0.98);
+  --control-bg: rgb(26 33 82 / 0.85);
+  --page-glow-1: rgb(98 70 199 / 0.38);
+  --page-glow-2: rgb(48 80 190 / 0.3);
+  --page-glow-3: rgb(120 60 190 / 0.26);
+  --page-glow-4: rgb(40 110 190 / 0.2);
+  --tile-from: #353d8c;
+  --tile-edge: rgb(190 198 255 / 0.28);
+  --page-top: #0b1026;
+  --page-bottom: #0e1334;
+  --chart-teal: #9d8cff;
+  --chart-teal-dark: #c4baff;
+  --chart-blue: #8db4ff;
+  --chart-red: #ff8a80;
+  --chart-amber: #f5c76a;
+  --chart-green: #6ee7a8;
+  --chart-navy: #c4baff;
+  --chart-violet: #a496ff;
+  --chart-mid: #7c6af0;
+  --chart-light: #4a4f9a;
+  --chart-grid: #2b3470;
+  --chart-axis: #a3acdc;
+  --chart-track: #232a5c;
+  --chart-empty: #232a5c;
+  --scale-1: #c4baff;
+  --scale-2: #a496ff;
+  --scale-3: #8473f0;
+  --scale-4: #5f55c7;
+  --scale-5: #3a3f8a;
+}
+:root[data-theme="clinical"] {
+  color-scheme: light;
+  --color-canvas: #ffffff;
+  --color-surface: #ffffff;
+  --color-line: #b9b3d0;
+  --color-line-strong: #4a4470;
+  --color-ink: #000000;
+  --color-ink-soft: #1d1840;
+  --color-ink-muted: #3b3463;
+  --color-brand: #3b1fa8;
+  --color-brand-hover: #2c1580;
+  --color-brand-soft: #e8e2fb;
+  --color-brand-ink: #2c1580;
+  --color-brand-mid: #5b3fb8;
+  --color-brand-light: #b6a8ea;
+  --color-ok: #03482a;
+  --color-ok-bg: #d4f1df;
+  --color-ok-line: #2f8d5e;
+  --color-warn: #5c3400;
+  --color-warn-bg: #fbe6b0;
+  --color-warn-line: #a56a00;
+  --color-danger: #8a1409;
+  --color-danger-bg: #fbd9d5;
+  --color-danger-line: #c0392b;
+  --color-info: #0e3480;
+  --color-info-bg: #d6e4fb;
+  --color-info-line: #3b6fd0;
+  --color-neutral: #1d1840;
+  --color-neutral-bg: #e6e2f1;
+  --color-neutral-line: #8d86ae;
+  --glass-bg: #ffffff;
+  --glass-bg-strong: #ffffff;
+  --glass-edge: #4a4470;
+  --glass-hi: rgb(255 255 255 / 0);
+  --glass-lo: rgb(0 0 0 / 0);
+  --glass-contact: rgb(0 0 0 / 0.12);
+  --glass-diffuse: rgb(0 0 0 / 0.1);
+  --bar-bg: #ffffff;
+  --side-bg: #ffffff;
+  --tile-bg: #f6f4fc;
+  --pop-bg: #ffffff;
+  --control-bg: #ffffff;
+  --page-glow-1: rgb(255 255 255 / 0);
+  --page-glow-2: rgb(255 255 255 / 0);
+  --page-glow-3: rgb(255 255 255 / 0);
+  --page-glow-4: rgb(255 255 255 / 0);
+  --tile-from: #ffffff;
+  --tile-edge: #4a4470;
+  --page-top: #ffffff;
+  --page-bottom: #f6f4fc;
+  --chart-teal: #3b1fa8;
+  --chart-teal-dark: #2c1580;
+  --chart-mid: #5b3fb8;
+  --chart-light: #b6a8ea;
+  --chart-grid: #b9b3d0;
+  --chart-axis: #1d1840;
+  --chart-track: #e6e2f1;
+  --scale-1: #2c1580;
+  --scale-2: #3b1fa8;
+  --scale-3: #5b3fb8;
+  --scale-4: #8f7bdc;
+  --scale-5: #d9d0f6;
+}
+:root[data-theme="clinical"] .glass,
+:root[data-theme="clinical"] .glass-card,
+:root[data-theme="clinical"] .card,
+:root[data-theme="clinical"] .glass-bar,
+:root[data-theme="clinical"] .glass-side {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+:root[data-theme="dark"] .grad-brand,
+:root[data-theme="clinical"] .grad-brand {
+  background: linear-gradient(135deg, #6d4fd6 0%, #3f2a9a 100%);
+  color: #fff;
+}
+
+/* Solid surfaces when blur is unavailable or the user asks for less transparency. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass,
+  .card,
+  .glass-bar,
+  .glass-side {
+    background: rgb(252 250 255 / 0.98);
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .glass,
+  .card,
+  .glass-strong,
+  .glass-bar,
+  .glass-side {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: #fdfcff;
+  }
+  .tile {
+    background: #faf8ff;
+  }
+}
+
+/* Ask Anticipa launcher: a quiet glow until the panel has been opened once. Off under reduced motion. */
+.ask-pulse {
+  animation: ask-glow 2.6s ease-in-out infinite;
+}
+@keyframes ask-glow {
+  0%,
+  100% {
+    box-shadow: 0 14px 28px -10px rgb(79 51 168 / 0.55), 0 0 0 0 rgb(113 82 211 / 0.35);
+  }
+  50% {
+    box-shadow: 0 14px 28px -10px rgb(79 51 168 / 0.55), 0 0 0 10px rgb(113 82 211 / 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ask-pulse {
+    animation: none;
+  }
+}
+
+/* India map material: face transitions and the pin pulse. Reduced motion gets the flat, static map. */
+.map-face {
+  transition: transform 220ms ease, opacity 220ms ease, stroke-width 220ms ease;
+}
+.map-pin {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: map-pin-pulse 1.7s ease-out infinite;
+}
+@keyframes map-pin-pulse {
+  0% {
+    transform: scale(0.5);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .map-tilt {
+    transform: none !important;
+  }
+  .map-extrude {
+    display: none;
+  }
+  .map-face,
+  .map-zoom {
+    transition: none !important;
+  }
+  .map-pin {
+    animation: none;
+    opacity: 0;
+  }
+}
+
+/* Diagonal hatch for simulated content. Pattern plus a text label, never colour alone. */
 .hatch {
-  background-image: repeating-linear-gradient(
-    135deg,
-    transparent 0 5px,
-    rgb(59 37 112 / 0.14) 5px 6px
-  );
+  background-image: repeating-linear-gradient(135deg, transparent 0 5px, rgb(74 45 153 / 0.1) 5px 6px);
 }
 
 .tnum {

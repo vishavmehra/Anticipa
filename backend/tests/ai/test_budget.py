@@ -12,11 +12,17 @@ import pytest
 from pydantic import BaseModel
 
 from anticipa.ai.sinks import InMemorySink, InvocationRecord
-from anticipa.ai.testing import FakeAdapter, err, make_test_router, ok
+from anticipa.ai.testing import FakeAdapter, err, ok, two_provider_config
+from anticipa.ai.testing import make_test_router as _make_test_router
 from anticipa.ai.types import EmbedRequest, GenerateRequest, RouterError
 
 pytestmark = pytest.mark.anyio
 D = Decimal
+
+
+def make_test_router(adapters, **kw):
+    """Mechanics route: Nebius -> Haiku (the shipped extraction route is Haiku only)."""
+    return _make_test_router(adapters, config=two_provider_config(), **kw)
 
 
 class Fact(BaseModel):

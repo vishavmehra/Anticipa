@@ -8,23 +8,28 @@ export const PERMS = {
   population_admin: [
     "analytics.view", "residents.view", "records.view", "documents.view", "evidence.view", "guidelines.view", "rules.view",
     "engagement.view", "processing.execute",
-    "jobs.view", "capacity.view", "capacity.manage", "caregaps.view", "caregaps.manage", "caregaps.close",
-    "audit.view", "integrations.view",
+    "capacity.view", "capacity.manage", "caregaps.view", "caregaps.manage", "caregaps.close",
+    "audit.view", "consent.view", "consent.manage",
   ],
   care_coordinator: [
-    "analytics.view_limited", "residents.view", "guidelines.view", "capacity.view", "caregaps.view",
-    "caregaps.manage", "caregaps.close", "audit.view_scoped", "integrations.view",
+    "analytics.view_limited", "residents.view", "guidelines.view", "capacity.view", "caregaps.view", "engagement.view",
+    "caregaps.manage", "caregaps.close", "audit.view_scoped", "consent.view", "consent.manage",
+  ],
+  // Mirrors ROLE_PERMISSIONS[SYSTEM_ADMIN]: the only role holding system.configure, so the only one that sees System pages.
+  system_admin: [
+    "analytics.view", "residents.view", "records.view", "documents.view", "evidence.view", "guidelines.view", "rules.view",
+    "caregaps.view", "capacity.view", "engagement.view", "appointments.view", "closure.view", "jobs.view",
+    "integrations.view", "audit.view", "processing.execute", "capacity.manage", "caregaps.manage", "system.configure", "consent.view",
   ],
   clinical_reviewer: [
     "analytics.view", "residents.view", "records.view", "documents.view", "evidence.view", "guidelines.view",
-    "rules.view", "caregaps.view", "closure.view", "integrations.view", "audit.view_scoped",
+    "rules.view", "caregaps.view", "closure.view", "audit.view_scoped", "consent.view",
     "evidence.review", "guidelines.approve", "caregaps.review",
   ],
-  // Mirrors ROLE_PERMISSIONS[OBSERVER] exactly: _ADMIN_VIEWS + analytics.view + audit.view_redacted.
+  // Observer: product views only. Jobs, audit and integrations are system pages (system.configure).
   observer: [
     "analytics.view", "residents.view", "records.view", "documents.view", "evidence.view", "guidelines.view",
-    "rules.view", "caregaps.view", "capacity.view", "engagement.view", "appointments.view", "closure.view",
-    "jobs.view", "integrations.view", "audit.view_redacted",
+    "rules.view", "caregaps.view", "capacity.view", "engagement.view", "appointments.view", "closure.view", "consent.view",
   ],
 } as const;
 
@@ -174,7 +179,12 @@ export const job = (over: Record<string, unknown> = {}) => ({
 export async function boot(page: Page, context: BrowserContext, role: TestRole, handlers: Record<string, ApiHandler> = {}) {
   const supabase = await mockSupabase(page, { role });
   await signIn(context, role);
-  const api = await mockApi(page, { "GET /auth/me": () => ({ body: ok(meFor(role)) }), ...handlers });
+  // The shell itself calls these two on every page (bell badge and the district scope pill).
+  const shell = {
+    "GET /analytics/alerts/summary": () => ({ body: ok({ alerts_active: 0, by_severity: {}, items: [] }) }),
+    "GET /meta/scope": () => ({ body: ok({ country: { code: "IN", name: "India" }, states: [], districts: [] }) }),
+  };
+  const api = await mockApi(page, { "GET /auth/me": () => ({ body: ok(meFor(role)) }), ...shell, ...handlers });
   return { supabase, api };
 }
 

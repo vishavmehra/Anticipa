@@ -1,8 +1,11 @@
-"""Background job `caregaps.create_cases`: create care-gap cases from the latest eligibility evaluations (04 §12.4).
+"""Background job `caregaps.create_cases`: create care-gap cases from the latest eligibility evaluations (04
+§12.4).
 
-input_scope: rule_version_ids [uuid] (optional; default all), outcomes [eligible|requires_clinical_review|
-insufficient_evidence] (default eligible + requires_clinical_review), auto_approve bool (default true).
-Idempotent: evaluations that already have a case, and residents that already have an open case for the care activity,
+input_scope: guideline_version_ids [uuid] (optional; default all), outcomes
+[eligible|requires_clinical_review|
+insufficient_evidence] (default: the first two), auto_approve bool (default true).
+Idempotent: evaluations that already have a case, and residents that already have an open case for the care
+activity,
 are skipped, so a retried job never duplicates anything.
 """
 
@@ -31,12 +34,20 @@ def handle(ctx: JobContext) -> None:
 
     totals = create_cases_scan(
         ctx.session,
-        [uuid.UUID(x) for x in scope.get("rule_version_ids", [])] or None,
+        [uuid.UUID(x) for x in scope.get("guideline_version_ids", [])] or None,
         outcomes=tuple(scope.get("outcomes", CASE_OUTCOMES)),
         auto_approve=bool(scope.get("auto_approve", True)),
         actor=actor,
         on_chunk=on_chunk,
     )
     with ctx.session() as s:
-        audit.record(s, actor, "caregap.create_cases", "processing_job", ctx.job_id, "success", {"job_id": str(ctx.job_id), **totals})
+        audit.record(
+            s,
+            actor,
+            "caregap.create_cases",
+            "processing_job",
+            ctx.job_id,
+            "success",
+            {"job_id": str(ctx.job_id), **totals},
+        )
         s.commit()

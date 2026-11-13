@@ -39,3 +39,8 @@ Thumbs.db
 .remember/
 graphify-out/
 .claude/settings.local.json
+
+# --- Test artefacts and archives (may hold session tokens / traces) ---
+*.7z
+*.zip
+test-results*

@@ -13,7 +13,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import JSONB
@@ -22,7 +22,8 @@ from sqlalchemy.orm import Session
 
 from anticipa.core import audit
 from anticipa.core.audit import Actor
-from anticipa.core.errors import Conflict, NotFound
+from anticipa.core.auth import CurrentUser
+from anticipa.core.errors import ApiError, Conflict, NotFound
 from anticipa.core.ids import uuid5_of
 from anticipa.jobs.context import JobCancelled, JobContext, short_error
 from anticipa.planning.adapters import CaseFilters, load_plannable_cases
@@ -231,18 +232,34 @@ def _persist(session: Session, run: PlanningRun, cases: Sequence[PlannableCase],
 
 
 # ------------------------------------------------------------------------------------------------ confirmation
-def confirm_allocation(session: Session, allocation_id: uuid.UUID, actor: Actor) -> tuple[PlannedAllocation, bool]:
-    """Re-validate the slot, then reserve one seat and mark the allocation confirmed. Idempotent for an already
-    confirmed allocation (returns `(allocation, False)`). Does NOT create an appointment (later wave) and does not
-    change the care-gap case status (the caller / care-gap module owns that transition). Caller commits."""
+class ConfirmResult(NamedTuple):
+    allocation: PlannedAllocation
+    newly_confirmed: bool
+    appointment_created: bool  # True when the engagement hook created the (simulated) appointment hold in this call
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)  # one seam so tests can pin the clock
+
+
+def confirm_allocation(session: Session, allocation_id: uuid.UUID, actor: Actor, *, user: CurrentUser | None = None,
+                       source: str = "manual", job_id: uuid.UUID | None = None,
+                       hold_appointment: bool = True) -> ConfirmResult:  # fmt: skip
+    """Re-validate the slot, reserve one seat and mark the allocation confirmed, then (same transaction) let the
+    engagement module hold the slot with a simulated appointment and move the case to `planned`. Refused with 409 when
+    the slot is full/closed/missing, already started, or the case already has a confirmed allocation, or when the
+    appointment hold is refused (the reservation is rolled back). Idempotent for an already confirmed allocation.
+    If the engagement module cannot be imported the confirmation still succeeds and a warning is logged.
+    `hold_appointment=False` reserves the seat only (for callers that create the appointment themselves). Caller commits."""
     alloc = session.get(PlannedAllocation, allocation_id, with_for_update=True)
     if alloc is None:
         raise NotFound("Allocation not found.")
     if alloc.allocation_status == "confirmed":
-        return alloc, False
+        return ConfirmResult(alloc, False, False)
 
-    def refuse(reason: str, field: str) -> Conflict:
-        audit.record(session, actor, "planning.allocation.confirm", "planned_allocation", alloc.id, "failure", {"reason": reason})
+    def refuse(reason: str, field: str, details: dict[str, Any] | None = None) -> Conflict:
+        audit.record(session, actor, "planning.allocation.confirm", "planned_allocation", allocation_id, "failure",
+                     {"reason": reason, **(details or {})})  # fmt: skip
         session.commit()  # keep the audit trail of the refused confirmation
         return Conflict(reason, [{"field": field, "reason": reason}])
 
@@ -258,26 +275,72 @@ def confirm_allocation(session: Session, allocation_id: uuid.UUID, actor: Actor)
         raise refuse("The proposed slot no longer exists.", "capacity_slot_id")
     if slot.slot_status != "open" or clinic.operating_status != "open" or not service.active:
         raise refuse("The slot, clinic or service is no longer open.", "capacity_slot_id")
+    if slot.start_time <= _utcnow():
+        raise refuse("The slot has already started; a past slot cannot be confirmed.", "capacity_slot_id")
     if slot.reserved_capacity >= slot.available_capacity:
         raise refuse("The slot has no remaining capacity.", "capacity_slot_id")
 
-    slot.reserved_capacity += 1
-    alloc.allocation_status, alloc.confirmed_at, alloc.confirmed_by = "confirmed", datetime.now(UTC), actor.id
-    session.execute(  # other runs' proposals for the same case are now moot
-        update(PlannedAllocation)
-        .where(PlannedAllocation.care_gap_case_id == alloc.care_gap_case_id, PlannedAllocation.id != alloc.id,
-               PlannedAllocation.allocation_status == "proposed")
-        .values(allocation_status="superseded")
-    )  # fmt: skip
+    slot_id, case_id, run_id = slot.id, alloc.care_gap_case_id, run.id
+    appointment_created = False
     try:
-        session.flush()
-    except IntegrityError:  # partial unique index: the case already has a confirmed allocation elsewhere
-        session.rollback()
-        alloc = session.get(PlannedAllocation, allocation_id)
-        assert alloc is not None
+        with session.begin_nested():  # SAVEPOINT: a refused hold must undo only the reservation
+            slot.reserved_capacity += 1
+            alloc.allocation_status, alloc.confirmed_at, alloc.confirmed_by = "confirmed", _utcnow(), actor.id
+            session.execute(  # other runs' proposals for the same case are now moot
+                update(PlannedAllocation)
+                .where(PlannedAllocation.care_gap_case_id == case_id, PlannedAllocation.id != allocation_id,
+                       PlannedAllocation.allocation_status == "proposed")
+                .values(allocation_status="superseded")
+            )  # fmt: skip
+            session.flush()  # partial unique index: at most one confirmed allocation per case
+            if hold_appointment:
+                appointment_created = _hold_appointment(session, allocation_id, actor, user, source, job_id)
+    except IntegrityError:
         raise refuse("The case already has a confirmed allocation.", "care_gap_case_id") from None
-    audit.record(session, actor, "planning.allocation.confirm", "planned_allocation", alloc.id, "success",
-                 {"capacity_slot_id": str(slot.id), "care_gap_case_id": str(alloc.care_gap_case_id), "planning_run_id": str(run.id)})  # fmt: skip
+    except ApiError as exc:  # the engagement/care-gap lifecycle refused the hold: nothing stays reserved
+        raise refuse(f"The appointment hold was refused: {exc.message}", "care_gap_case_id", {"stage": "appointment_hold"}) from exc
+    alloc = session.get(PlannedAllocation, allocation_id)
+    assert alloc is not None
+    audit.record(session, actor, "planning.allocation.confirm", "planned_allocation", allocation_id, "success",
+                 {"capacity_slot_id": str(slot_id), "care_gap_case_id": str(case_id), "planning_run_id": str(run_id),
+                  "appointment_hold_created": appointment_created})  # fmt: skip
+    return ConfirmResult(alloc, True, appointment_created)
+
+
+def _hold_appointment(session: Session, allocation_id: uuid.UUID, actor: Actor, user: CurrentUser | None, source: str,
+                      job_id: uuid.UUID | None) -> bool:  # fmt: skip
+    """Engagement hook (lazy import: planning must work without it). True if it created the appointment hold."""
+    try:
+        from anticipa.engagement.service import on_allocation_confirmed
+    except ImportError as exc:
+        log.warning("engagement module unavailable; allocation confirmed without an appointment hold (%s)", type(exc).__name__)
+        return False
+    _, created = on_allocation_confirmed(session, allocation_id, actor=actor, user=user, source=source, job_id=job_id)
+    return created
+
+
+def release_allocation(session: Session, allocation_id: uuid.UUID, actor: Actor, *,
+                       reason: str | None = None) -> tuple[PlannedAllocation, bool]:  # fmt: skip
+    """Give a CONFIRMED allocation's seat back (appointment cancelled / no-show). Returns `(allocation, released)`;
+    releasing an allocation that is already released is a no-op (`False`), a proposal that was never confirmed is a 409.
+    The allocation becomes `superseded` (no schema change: 0003's status set is fixed; the audit event says why), so it can
+    never be confirmed again and its case can be planned afresh. Does not touch appointments or the case. Caller commits."""
+    alloc = session.get(PlannedAllocation, allocation_id, with_for_update=True)
+    if alloc is None:
+        raise NotFound("Allocation not found.")
+    if alloc.allocation_status == "superseded":
+        return alloc, False
+    if alloc.allocation_status != "confirmed":
+        raise Conflict(f"Only a confirmed allocation can be released; this one is {alloc.allocation_status}.",
+                       [{"field": "allocation_status", "reason": alloc.allocation_status}])  # fmt: skip
+    slot = session.get(CapacitySlot, alloc.capacity_slot_id, with_for_update=True)
+    if slot is not None and slot.reserved_capacity > 0:
+        slot.reserved_capacity -= 1
+    alloc.allocation_status = "superseded"
+    session.flush()
+    audit.record(session, actor, "planning.allocation.release", "planned_allocation", alloc.id, "success",
+                 {"reason": (reason or "").strip()[:300] or None, "capacity_slot_id": str(alloc.capacity_slot_id),
+                  "care_gap_case_id": str(alloc.care_gap_case_id), "simulated": True})  # fmt: skip
     return alloc, True
 
 

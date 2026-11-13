@@ -1,39 +1,47 @@
-"""Declarative rule format `anticipa-rule-v1` (Docs/08 §6): constrained JSON, pydantic-validated, never executed.
+"""Declarative rules in the Docs/08 §6 format (the format of config/guidelines/rules_draft.json, schema v2):
+constrained
+JSON, pydantic-validated, never executed. `rule_language = "anticipa-08-v1"`.
 
-A rule decides ONE care activity for ONE resident from deterministic inputs (08 §3). Shape:
+A guideline version is evaluated as a whole (08 §8): every rule turns its expression result (true / false /
+unknown) into
+a criterion outcome (`criterion_semantics`) and into an overall-outcome contribution
+(`outcome_by_expression_result`,
+null = none); the version's `decision_policy` ranks the contributions and the best-ranked one is the overall
+outcome
+(none -> eligible). The seven overall outcomes are those of 04 §11.2.
 
-    {
-      "care_activity": "example_screening",              # snake_case; becomes CareGapCase.care_activity
-      "priority": "routine" | "elevated" | "high",        # default routine (case priority classification)
-      "missing_data_policy": "unknown" | "not_satisfied" | "review_required",   # default for leaves; default unknown
-      "inclusion": <node>,                                # must evaluate to passed for eligibility
-      "exclusions": [ {"id": "...", "outcome": "not_eligible" | "already_completed" | "temporarily_excluded"
-                                               | "requires_clinical_review", "condition": <node>} ]
-    }
+Rule (engine-executed keys; every other key — source references, grade, applicability, explanation text,
+pathways, notes —
+is stored verbatim as metadata and can never influence evaluation):
+    rule_id, name, rule_type, priority (int; the lowest number wins when naming the primary reason),
+    expression,
+    criterion_semantics, outcome_by_expression_result, review_class (optional; lets a decision step rank only
+    some
+    requires_clinical_review contributions), missing_data_policy (unknown | not_satisfied | review_required),
+    reason_code, reason_code_when_unknown, explanation_templates (approved text; never LLM-written).
 
-`<node>` is one of: `{"operator": "AND"|"OR", "conditions": [<node>, ...]}`, `{"operator": "NOT", "condition": <node>}`
-or a leaf. Leaves (every leaf has a unique `id`; unknown keys, fields and operators are rejected):
+Expression nodes (unknown operators/fields/keys are rejected):
+    {"operator": "AND"|"OR", "conditions": [...]}
+    {"operator": "NOT", "condition": {...}}  (or a 1-item "conditions")
+    {"field", "operator", "value"} leaves:
+      resident.age                     whole years at the evaluation date; numeric operators;
+                                       value int or {"field": agg}
+      resident.sex_assigned_at_birth   EQUALS NOT_EQUALS IN NOT_IN with female|male|unknown
+      evidence.selector                EXISTS | NOT_EXISTS, value = selector name from the version's library
+      evidence.<sel>.latest_event_date DATE_WITHIN, value {"years"|"months"|"days": n, optional
+                                       "range_years": [min, max], "basis": "max"}: the event date lies in
+                                       (evaluation_date - n, evaluation_date];
+                                                partial dates use their full range; a range is metadata,
+                                                `years` (the max) decides
+      evidence.<sel>.distinct_subjects | min_age_at_onset | early_start_age | shared_subjects.<other sel>
+                                                numeric operators; value int or {"field": "..."}; aggregates
+                                                are INTERVALS when
+                                                subjects are unresolved or ages missing/conflicting (07
+                                                aggregate_semantics)
 
-  resident.age_years   whole years at the evaluation date; operators EQUALS NOT_EQUALS GREATER_THAN
-                       GREATER_THAN_OR_EQUAL LESS_THAN LESS_THAN_OR_EQUAL IN NOT_IN; `value` int (list[int] for IN)
-  resident.sex         administrative sex; operators EQUALS NOT_EQUALS IN NOT_IN; `value` male|female|other|unknown
-  clinical.condition | clinical.procedure | clinical.observation | clinical.immunization | clinical.diagnostic_report
-                       presence of normalised clinical records; operators EXISTS NOT_EXISTS; requires `codes`
-                       [{system, code}], optional `lookback` {years, months, days} (record date within the window
-                       ending on the evaluation date; future-dated records never count), optional `status_in`
-  evidence.fact        presence of ACCEPTED evidence facts; operators EXISTS NOT_EXISTS; requires `category` and
-                       `subject` ("resident" | "family_member"); optional `fact_types`, `assertion_status`
-                       (default ["positive"]), `temporal_status` (default ["current","historical"]), for family
-                       members `relationships` / `max_relationship_degree` (1 = parents, siblings, children), and
-                       `age_at_onset` {operator, value}
-
-Missing data (08 §3.3, §10.4): a presence leaf that finds nothing applies `missing_data_policy` to the *existence
-predicate*: `unknown` (default: no record is not proof of absence), `not_satisfied` (existence is taken as false, so
-EXISTS fails and NOT_EXISTS passes — an explicit rule-author opt-in, rejected for family-history facts), or
-`review_required` (unknown, and the outcome becomes requires_clinical_review if nothing conclusive decides it).
-
-Date operators of 08 §6.3 (DATE_BEFORE/AFTER/WITHIN) are deliberately not part of v1: temporal conditions are
-expressed with `lookback`, and every evaluation uses an explicit evaluation date.
+Selectors pick evidence by category, fact_type / codes, subject_type, relationship (and
+`unresolved_relationship_in`),
+assertion and temporal status. Only facts with validation_status `accepted` are ever definite (07, 08 §10.1).
 """
 
 from __future__ import annotations
@@ -41,7 +49,7 @@ from __future__ import annotations
 import hashlib
 import re
 from functools import cached_property
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal
 
 import orjson
 from pydantic import (
@@ -53,193 +61,226 @@ from pydantic import (
     StrictStr,
     Tag,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
-RULE_LANGUAGE = "anticipa-rule-v1"
-INPUT_SCHEMA_VERSION = "1"
+RULE_LANGUAGE = "anticipa-08-v1"
+INPUT_SCHEMA_VERSION = "3"
 
 MAX_DEPTH = 8
 MAX_LEAVES = 64
+MAX_RULES = 80
 
 MissingPolicy = Literal["unknown", "not_satisfied", "review_required"]
-ExclusionOutcome = Literal["not_eligible", "already_completed", "temporarily_excluded", "requires_clinical_review"]
-Priority = Literal["routine", "elevated", "high"]
-Sex = Literal["male", "female", "other", "unknown"]
-AssertionStatus = Literal["positive", "negative"]  # uncertain / conditional evidence can never satisfy a criterion
-TemporalStatus = Literal["current", "historical", "planned", "unknown"]
-EvidenceCategory = Literal[
-    "condition", "family_history", "procedure", "observation", "immunization", "diagnostic_finding", "symptom",
-    "risk_factor", "medication", "preventive_care",
-]  # fmt: skip
-Relationship = Literal[
-    "mother", "father", "sister", "brother", "daughter", "son", "spouse", "maternal_grandmother",
-    "maternal_grandfather", "paternal_grandmother", "paternal_grandfather", "maternal_aunt", "maternal_uncle",
-    "paternal_aunt", "paternal_uncle", "cousin", "half_sister", "half_brother", "other_relative",
-]  # fmt: skip
-
-# Genetic degree of relationship (a definition, not a clinical criterion). Spouse and other_relative have no degree.
-RELATIONSHIP_DEGREE: dict[str, int] = {
-    "mother": 1, "father": 1, "sister": 1, "brother": 1, "daughter": 1, "son": 1,
-    "maternal_grandmother": 2, "maternal_grandfather": 2, "paternal_grandmother": 2, "paternal_grandfather": 2,
-    "maternal_aunt": 2, "maternal_uncle": 2, "paternal_aunt": 2, "paternal_uncle": 2, "half_sister": 2,
-    "half_brother": 2, "cousin": 3,
-}  # fmt: skip
-
-CLINICAL_FIELDS: dict[str, str] = {  # leaf field -> clinical_records.category
-    "clinical.condition": "condition",
-    "clinical.procedure": "procedure",
-    "clinical.observation": "observation",
-    "clinical.immunization": "immunization",
-    "clinical.diagnostic_report": "diagnostic_report",
+CriterionOutcome = Literal["passed", "failed", "unknown", "not_applicable", "error"]
+# The seven overall outcomes of 04 §11.2.
+OUTCOMES = (
+    "eligible",
+    "not_eligible",
+    "already_completed",
+    "insufficient_evidence",
+    "requires_clinical_review",
+    "temporarily_excluded",
+    "evaluation_error",
+)
+Outcome = Literal[OUTCOMES]  # type: ignore[valid-type]
+OUTCOME_CLASSES = ("eligible", "ineligible", "indeterminate", "error")  # 08 §7 classes
+OUTCOME_CLASS: dict[str, str] = {
+    "eligible": "eligible",
+    "not_eligible": "ineligible",
+    "already_completed": "ineligible",
+    "temporarily_excluded": "ineligible",
+    "insufficient_evidence": "indeterminate",
+    "requires_clinical_review": "indeterminate",
+    "evaluation_error": "error",
 }
+RULE_TYPES = ("prerequisite", "inclusion", "exclusion", "temporal")
 NUMERIC_OPS = frozenset(
-    {"EQUALS", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUAL", "LESS_THAN", "LESS_THAN_OR_EQUAL", "IN", "NOT_IN"}
+    {
+        "EQUALS",
+        "NOT_EQUALS",
+        "GREATER_THAN",
+        "GREATER_THAN_OR_EQUAL",
+        "LESS_THAN",
+        "LESS_THAN_OR_EQUAL",
+        "IN",
+        "NOT_IN",
+    }
 )
 SET_OPS = frozenset({"EQUALS", "NOT_EQUALS", "IN", "NOT_IN"})
 PRESENCE_OPS = frozenset({"EXISTS", "NOT_EXISTS"})
-LEAF_FIELDS = ("resident.age_years", "resident.sex", *CLINICAL_FIELDS, "evidence.fact")
-LEAF_OPERATORS = tuple(sorted(NUMERIC_OPS | PRESENCE_OPS))
-RESERVED_IDS = frozenset({"inclusion", "engine.resident_alive"})
-_ID_RE = r"^[a-z][a-z0-9_\-]{0,63}$"
+NUMERIC_AGGREGATES = ("distinct_subjects", "min_age_at_onset", "early_start_age")
+DATE_AGGREGATES = ("latest_event_date",)
+SEXES = ("male", "female", "unknown")
+RESERVED_IDS = frozenset({"engine.resident_alive", "engine.error"})
+_NAME = r"[a-z][a-z0-9_]{0,63}"
+_NAME_RE = rf"^{_NAME}$"
+_AGG_FIELD = re.compile(rf"^evidence\.({_NAME})\.({'|'.join(NUMERIC_AGGREGATES + DATE_AGGREGATES)})$")
+_SHARED_FIELD = re.compile(rf"^evidence\.({_NAME})\.shared_subjects\.({_NAME})$")
+AGE_FIELD = "resident.age"
+SEX_FIELD = "resident.sex_assigned_at_birth"
+
+# Genetic degree of relationship (a definition, not a clinical criterion).
+RELATIONSHIP_DEGREE: dict[str, int] = {
+    "mother": 1,
+    "father": 1,
+    "sister": 1,
+    "brother": 1,
+    "daughter": 1,
+    "son": 1,
+    "maternal_grandmother": 2,
+    "maternal_grandfather": 2,
+    "paternal_grandmother": 2,
+    "paternal_grandfather": 2,
+    "maternal_aunt": 2,
+    "maternal_uncle": 2,
+    "paternal_aunt": 2,
+    "paternal_uncle": 2,
+    "half_sister": 2,
+    "half_brother": 2,
+    "cousin": 3,
+}
 
 
 class _Closed(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class Code(_Closed):
-    system: str = Field(min_length=1, max_length=200)
-    code: str = Field(min_length=1, max_length=64)
-    display: str | None = Field(None, max_length=200)  # documentation only; never used for matching
-
-
-class Lookback(_Closed):
+class Duration(_Closed):
     years: int = Field(0, ge=0, le=120)
     months: int = Field(0, ge=0, le=1440)
     days: int = Field(0, ge=0, le=36500)
+    range_years: list[StrictInt] | None = Field(
+        None, min_length=2, max_length=2
+    )  # (min, max): recommended interval range
+    basis: Literal["max"] | None = (
+        None  # which end of the range decides: the maximum (due date = last event + max)
+    )
 
     @model_validator(mode="after")
-    def _positive(self) -> Lookback:
+    def _consistent(self) -> Duration:
         if self.years + self.months + self.days <= 0:
-            raise ValueError("lookback must be longer than zero")
+            raise ValueError("a duration must be longer than zero")
+        if self.range_years is not None:
+            lo, hi = self.range_years
+            if not 0 < lo <= hi:
+                raise ValueError("range_years must be [min, max] with 0 < min <= max")
+            if self.basis != "max" or self.years != hi or self.months or self.days:
+                raise ValueError(
+                    'with range_years, basis must be "max" and years must equal the range maximum'
+                )
+        elif self.basis is not None:
+            raise ValueError("basis is only meaningful together with range_years")
         return self
 
 
-class OnsetCondition(_Closed):
-    operator: Literal[
-        "EQUALS", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUAL", "LESS_THAN", "LESS_THAN_OR_EQUAL"
-    ]
-    value: StrictInt = Field(ge=0, le=130)
+class FieldRef(_Closed):
+    field: str
+
+
+def parse_field(name: str) -> tuple[str, str, str | None] | None:
+    """(selector, aggregate, other selector for shared_subjects) of an evidence aggregate field, else None."""
+    if m := _AGG_FIELD.match(name):
+        return m.group(1), m.group(2), None
+    if m := _SHARED_FIELD.match(name):
+        return m.group(1), "shared_subjects", m.group(2)
+    return None
 
 
 class Leaf(_Closed):
-    id: str = Field(pattern=_ID_RE)
-    label: str | None = Field(None, max_length=300)
-    field: Literal[
-        "resident.age_years", "resident.sex", "clinical.condition", "clinical.procedure", "clinical.observation",
-        "clinical.immunization", "clinical.diagnostic_report", "evidence.fact",
-    ]  # fmt: skip
+    field: str
     operator: Literal[
-        "EQUALS", "NOT_EQUALS", "GREATER_THAN", "GREATER_THAN_OR_EQUAL", "LESS_THAN", "LESS_THAN_OR_EQUAL", "IN",
-        "NOT_IN", "EXISTS", "NOT_EXISTS",
-    ]  # fmt: skip
-    value: StrictInt | StrictStr | list[StrictInt] | list[StrictStr] | None = None
-    # presence parameters (clinical.*)
-    codes: list[Code] | None = Field(None, min_length=1, max_length=200)
-    lookback: Lookback | None = None
-    status_in: list[str] | None = Field(None, min_length=1)
-    # evidence.fact parameters
-    category: EvidenceCategory | None = None
-    subject: Literal["resident", "family_member"] | None = None
-    fact_types: list[str] | None = Field(None, min_length=1)
-    assertion_status: list[AssertionStatus] | None = Field(None, min_length=1)
-    temporal_status: list[TemporalStatus] | None = Field(None, min_length=1)
-    relationships: list[Relationship] | None = Field(None, min_length=1)
-    max_relationship_degree: int | None = Field(None, ge=1, le=3)
-    age_at_onset: OnsetCondition | None = None
-    missing_data_policy: MissingPolicy | None = None  # None -> the rule's default
+        "EQUALS",
+        "NOT_EQUALS",
+        "GREATER_THAN",
+        "GREATER_THAN_OR_EQUAL",
+        "LESS_THAN",
+        "LESS_THAN_OR_EQUAL",
+        "IN",
+        "NOT_IN",
+        "EXISTS",
+        "NOT_EXISTS",
+        "DATE_WITHIN",
+    ]
+    value: StrictInt | StrictStr | list[StrictInt] | list[StrictStr] | Duration | FieldRef | None = None
 
     @cached_property
-    def codeset(self) -> frozenset[tuple[str, str]]:
-        return frozenset((c.system, c.code) for c in self.codes or ())
-
-    @cached_property
-    def status_set(self) -> frozenset[str] | None:
-        return frozenset(self.status_in) if self.status_in else None
+    def parsed_field(self) -> tuple[str, str, str | None] | None:
+        return parse_field(self.field)
 
     @model_validator(mode="after")
-    def _check_field_contract(self) -> Leaf:
-        used = {
-            k for k in ("value", "codes", "lookback", "status_in", "category", "subject", "fact_types",
-                        "assertion_status", "temporal_status", "relationships", "max_relationship_degree",
-                        "age_at_onset")
-            if getattr(self, k) is not None
-        }  # fmt: skip
-        allowed: set[str]
-        if self.field == "resident.age_years":
-            self._need_operator(NUMERIC_OPS)
-            allowed = {"value"}
-            self._value_ints()
-        elif self.field == "resident.sex":
-            self._need_operator(SET_OPS)
-            allowed = {"value"}
-            self._value_sexes()
-        elif self.field in CLINICAL_FIELDS:
-            self._need_operator(PRESENCE_OPS)
-            allowed = {"codes", "lookback", "status_in"}
-            if self.codes is None:
-                raise ValueError(f"{self.field} requires `codes`")
-        else:  # evidence.fact
-            self._need_operator(PRESENCE_OPS)
-            allowed = {"category", "subject", "fact_types", "assertion_status", "temporal_status", "age_at_onset"}
-            if self.category is None or self.subject is None:
-                raise ValueError("evidence.fact requires `category` and `subject`")
-            if self.subject == "family_member":
-                allowed |= {"relationships", "max_relationship_degree"}
-                if self.missing_data_policy == "not_satisfied":
-                    raise ValueError(
-                        "missing_data_policy `not_satisfied` is not allowed for family history: "
-                        "a missing family-history entry never proves the absence of family history"
-                    )
-        extra = used - allowed
-        if extra:
-            raise ValueError(f"parameters {sorted(extra)} are not valid for field {self.field}")
+    def _contract(self) -> Leaf:
+        op, v = self.operator, self.value
+        if self.field == AGE_FIELD:
+            self._ops(NUMERIC_OPS)
+            self._numeric_value()
+        elif self.field == SEX_FIELD:
+            self._ops(SET_OPS)
+            items = v if isinstance(v, list) else [v]
+            if (
+                (op in ("IN", "NOT_IN")) != isinstance(v, list)
+                or not items
+                or not all(isinstance(x, str) and x in SEXES for x in items)
+            ):
+                raise ValueError(
+                    f"{op} on {SEX_FIELD} needs {'a list' if op in ('IN', 'NOT_IN') else 'one value'} from {list(SEXES)}"  # noqa: E501
+                )
+        elif self.field == "evidence.selector":
+            self._ops(PRESENCE_OPS)
+            if not isinstance(v, str) or not re.match(_NAME_RE, v):
+                raise ValueError("evidence.selector needs a selector name as value")
+        elif (pf := parse_field(self.field)) is not None:
+            if pf[1] in DATE_AGGREGATES:
+                if op != "DATE_WITHIN":
+                    raise ValueError(f"{self.field} supports DATE_WITHIN only")
+                if not isinstance(v, Duration):
+                    raise ValueError('DATE_WITHIN needs a duration value like {"years": 5}')
+            else:
+                self._ops(NUMERIC_OPS)
+                self._numeric_value()
+        else:
+            raise ValueError(f"unknown field '{self.field}'")
         return self
 
-    def _need_operator(self, ops: frozenset[str]) -> None:
+    def _ops(self, ops: frozenset[str]) -> None:
         if self.operator not in ops:
-            raise ValueError(f"operator {self.operator} is not valid for field {self.field}; use one of {sorted(ops)}")
+            raise ValueError(
+                f"operator {self.operator} is not valid for field {self.field}; use one of {sorted(ops)}"
+            )
 
-    def _value_ints(self) -> None:
+    def _numeric_value(self) -> None:
         v = self.value
         if self.operator in ("IN", "NOT_IN"):
             if not isinstance(v, list) or not v or not all(isinstance(x, int) for x in v):
-                raise ValueError(f"{self.operator} requires a non-empty list of integers")
+                raise ValueError(f"{self.operator} needs a non-empty list of integers")
+        elif isinstance(v, FieldRef):
+            pf = parse_field(v.field)
+            if pf is None or pf[1] in DATE_AGGREGATES:
+                raise ValueError(f"value reference '{v.field}' is not a numeric evidence aggregate")
         elif not isinstance(v, int):
-            raise ValueError(f"{self.operator} requires an integer `value`")
-
-    def _value_sexes(self) -> None:
-        v = self.value
-        items = v if isinstance(v, list) else [v]
-        if (self.operator in ("IN", "NOT_IN")) != isinstance(v, list):
-            raise ValueError(f"{self.operator} {'requires a list' if isinstance(v, str) else 'requires a single value'}")
-        if not items or not all(isinstance(x, str) and x in ("male", "female", "other", "unknown") for x in items):
-            raise ValueError("sex values must be male, female, other or unknown")
+            raise ValueError(f"{self.operator} needs an integer value or a field reference")
 
 
 class AndOrGroup(_Closed):
-    id: str | None = Field(None, pattern=_ID_RE)
-    label: str | None = Field(None, max_length=300)
     operator: Literal["AND", "OR"]
     conditions: list[Node] = Field(min_length=1)
 
 
 class NotGroup(_Closed):
-    id: str | None = Field(None, pattern=_ID_RE)
-    label: str | None = Field(None, max_length=300)
     operator: Literal["NOT"]
-    condition: Node
+    condition: Node | None = None
+    conditions: list[Node] | None = Field(None, min_length=1, max_length=1)
+
+    @model_validator(mode="after")
+    def _one_child(self) -> NotGroup:
+        if (self.condition is None) == (self.conditions is None):
+            raise ValueError("NOT needs exactly one of `condition` or a single-item `conditions`")
+        return self
+
+    @property
+    def child(self) -> Node:
+        return self.condition if self.condition is not None else self.conditions[0]  # type: ignore[index]
 
 
 def _node_tag(value: Any) -> str:
@@ -252,95 +293,256 @@ def _node_tag(value: Any) -> str:
 
 
 Node = Annotated[
-    Union[Annotated[AndOrGroup, Tag("group")], Annotated[NotGroup, Tag("not")], Annotated[Leaf, Tag("leaf")]],  # noqa: UP007
+    Annotated[AndOrGroup, Tag("group")] | Annotated[NotGroup, Tag("not")] | Annotated[Leaf, Tag("leaf")],
     Discriminator(_node_tag),
 ]
 
 
-class Exclusion(_Closed):
-    id: str = Field(pattern=_ID_RE)
-    label: str | None = Field(None, max_length=300)
-    outcome: ExclusionOutcome = "not_eligible"
-    condition: Node
+def leaves_of(node: Any) -> list[Leaf]:
+    if isinstance(node, Leaf):
+        return [node]
+    if isinstance(node, NotGroup):
+        return leaves_of(node.child)
+    return [lf for c in node.conditions for lf in leaves_of(c)]
 
 
-class RuleDefinition(_Closed):
-    care_activity: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
-    priority: Priority = "routine"
+class CriterionSemantics(_Closed):
+    true: CriterionOutcome
+    false: CriterionOutcome
+    unknown: CriterionOutcome
+
+    def for_result(self, value: bool | None) -> str:
+        return self.unknown if value is None else (self.true if value else self.false)
+
+
+class OutcomeMap(_Closed):
+    """Expression result -> contribution to the overall outcome (null = none)."""
+
+    true: Outcome | None
+    false: Outcome | None
+    unknown: Outcome | None
+
+    def for_result(self, value: bool | None) -> str | None:
+        return self.unknown if value is None else (self.true if value else self.false)
+
+
+class Rule(BaseModel):
+    """An 08 §6.1 rule. Unknown keys are kept as metadata (`extra="allow"`) but are never executed."""
+
+    model_config = ConfigDict(extra="allow")
+
+    rule_id: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=300)
+    rule_type: Literal["prerequisite", "inclusion", "exclusion", "temporal"]
+    priority: StrictInt = Field(ge=0, le=100000)
+    expression: Node
+    criterion_semantics: CriterionSemantics
+    outcome_by_expression_result: OutcomeMap
     missing_data_policy: MissingPolicy = "unknown"
-    inclusion: Node
-    exclusions: list[Exclusion] = Field(default_factory=list, max_length=32)
+    reason_code: str = Field(pattern=_NAME_RE)
+    reason_code_when_unknown: str | None = Field(None, pattern=_NAME_RE)
+    review_class: str | None = Field(None, pattern=_NAME_RE)
+    explanation_templates: dict[Literal["true", "false", "unknown"], str] | None = None
+
+    @field_validator("rule_id")
+    @classmethod
+    def _id(cls, v: str) -> str:
+        if v in RESERVED_IDS:
+            raise ValueError("reserved rule id")
+        return v
 
     @model_validator(mode="after")
-    def _structure(self) -> RuleDefinition:
-        ids: list[str] = [e.id for e in self.exclusions]
-        leaves = 0
-
-        def walk(node: Node, depth: int) -> None:
-            nonlocal leaves
-            if depth > MAX_DEPTH:
-                raise ValueError(f"expression nesting is deeper than {MAX_DEPTH}")
+    def _structure(self) -> Rule:
+        def depth(node: Any) -> int:
             if isinstance(node, Leaf):
-                leaves += 1
-                ids.append(node.id)
-            elif isinstance(node, NotGroup):
-                walk(node.condition, depth + 1)
-            else:
-                for child in node.conditions:
-                    walk(child, depth + 1)
+                return 1
+            if isinstance(node, NotGroup):
+                return 1 + depth(node.child)
+            return 1 + max(depth(c) for c in node.conditions)
 
-        walk(self.inclusion, 1)
-        for e in self.exclusions:
-            walk(e.condition, 1)
-        if leaves > MAX_LEAVES:
-            raise ValueError(f"a rule may have at most {MAX_LEAVES} criteria")
-        dupes = sorted({i for i in ids if ids.count(i) > 1} | (set(ids) & RESERVED_IDS))
-        if dupes:
-            raise ValueError(f"criterion ids must be unique and not reserved: {dupes}")
+        if depth(self.expression) > MAX_DEPTH:
+            raise ValueError(f"expression nesting is deeper than {MAX_DEPTH}")
+        if len(leaves_of(self.expression)) > MAX_LEAVES:
+            raise ValueError(f"a rule may have at most {MAX_LEAVES} conditions")
         return self
 
-    # -- canonical form ---------------------------------------------------------------------------------------------
+    @property
+    def key(self) -> str:
+        """Short rule key: the part of rule_id after the first '.' (guideline prefix), else the whole id."""
+        return self.rule_id.split(".", 1)[1] if "." in self.rule_id else self.rule_id
+
+    def selectors_used(self) -> set[str]:
+        names: set[str] = set()
+        for lf in leaves_of(self.expression):
+            if lf.field == "evidence.selector":
+                names.add(str(lf.value))
+            elif lf.parsed_field:
+                names.add(lf.parsed_field[0])
+                if lf.parsed_field[2]:
+                    names.add(lf.parsed_field[2])
+            if isinstance(lf.value, FieldRef) and (pf := parse_field(lf.value.field)):
+                names.add(pf[0])
+                if pf[2]:
+                    names.add(pf[2])
+        return names
+
+    def possible_contributions(self) -> set[str]:
+        out = {
+            o
+            for o in (
+                self.outcome_by_expression_result.true,
+                self.outcome_by_expression_result.false,
+                self.outcome_by_expression_result.unknown,
+            )
+            if o
+        }
+        if self.missing_data_policy == "review_required":
+            out.add("requires_clinical_review")
+        return out
+
     def normalized(self) -> dict[str, Any]:
-        """The canonical stored form (what the author wrote plus top-level defaults; unset optionals omitted)."""
-        return self.model_dump(mode="json", exclude_none=True)
+        return self.model_dump(mode="json", exclude_none=False, exclude_unset=False)
 
     def content_hash(self) -> str:
         return canonical_hash(self.normalized())
 
-    def leaves(self) -> list[Leaf]:
-        out: list[Leaf] = []
 
-        def walk(node: Node) -> None:
-            if isinstance(node, Leaf):
-                out.append(node)
-            elif isinstance(node, NotGroup):
-                walk(node.condition)
-            else:
-                for child in node.conditions:
-                    walk(child)
+class Selector(BaseModel):
+    model_config = ConfigDict(extra="allow")
 
-        walk(self.inclusion)
-        for e in self.exclusions:
-            walk(e.condition)
-        return out
+    category_in: list[str] = Field(min_length=1)
+    fact_type_in: list[str] = Field(min_length=1)
+    codes: list[dict[str, Any]] = Field(default_factory=list)
+    subject_type_in: list[Literal["resident", "family_member", "other", "unknown"]] = Field(min_length=1)
+    assertion_status_in: list[Literal["positive", "negative", "uncertain", "conditional"]] = Field(
+        min_length=1
+    )
+    temporal_status_in: list[Literal["current", "historical", "planned", "unknown"]] = Field(min_length=1)
+    relationship_in: list[str] | None = None
+    unresolved_relationship_in: list[str] | None = (
+        None  # relatives whose relevance cannot be decided (e.g. sex unknown)
+    )
+    lookback_years: int | None = Field(None, ge=1, le=120)
+
+    @cached_property
+    def codeset(self) -> frozenset[tuple[str, str]]:
+        return frozenset(
+            (str(c.get("system")), str(c.get("code")))
+            for c in self.codes
+            if c.get("system") and c.get("code")
+        )
+
+    @cached_property
+    def is_coverage(self) -> bool:
+        return "any" in self.category_in and "any" in self.fact_type_in
+
+    def normalized(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", exclude_none=True)
 
 
-AndOrGroup.model_rebuild()
-NotGroup.model_rebuild()
-Exclusion.model_rebuild()
-RuleDefinition.model_rebuild()
+class DecisionStep(BaseModel):
+    """`{"rank": n, "outcome": o, "only_rules_with_review_class": c?}` or the closing `{"otherwise":
+    "eligible"}`."""  # noqa: E501
+
+    model_config = ConfigDict(extra="forbid")
+    rank: StrictInt | None = Field(None, ge=1)
+    outcome: Outcome | None = None
+    only_rules_with_review_class: str | None = Field(None, pattern=_NAME_RE)
+    otherwise: Outcome | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> DecisionStep:
+        if self.otherwise is not None:
+            if (
+                self.rank is not None
+                or self.outcome is not None
+                or self.only_rules_with_review_class is not None
+            ):
+                raise ValueError("an `otherwise` step has no rank, outcome or class")
+        elif self.rank is None or self.outcome is None:
+            raise ValueError("a step needs rank and outcome, or otherwise")
+        return self
+
+
+class DecisionPolicy(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    name: str = "precedence_v2"
+    steps: list[DecisionStep] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _ranked(self) -> DecisionPolicy:
+        if self.steps[-1].otherwise is None:
+            raise ValueError("the last decision step must be `otherwise`")
+        ranked = self.steps[:-1]
+        if any(s.otherwise is not None for s in ranked):
+            raise ValueError("`otherwise` is only allowed as the last step")
+        ranks = [s.rank for s in ranked]
+        if ranks != sorted(set(ranks)):
+            raise ValueError("decision step ranks must be unique and ascending")
+        return self
+
+    def matching_step(self, outcome: str, review_class: str | None) -> DecisionStep | None:
+        for step in self.steps[:-1]:
+            if step.outcome == outcome and (step.only_rules_with_review_class in (None, review_class)):
+                return step
+        return None
+
+
+DEFAULT_DECISION_POLICY: dict[str, Any] = {
+    "name": "precedence_v2",
+    "steps": [
+        {"rank": 1, "outcome": "not_eligible"},
+        {"rank": 2, "outcome": "requires_clinical_review"},
+        {"rank": 3, "outcome": "already_completed"},
+        {"rank": 4, "outcome": "temporarily_excluded"},
+        {"rank": 5, "outcome": "evaluation_error"},
+        {"rank": 6, "outcome": "insufficient_evidence"},
+        {"otherwise": "eligible"},
+    ],
+}
+
+
+class GuidelineDefinition(BaseModel):
+    """Everything the engine needs to evaluate one guideline version."""
+
+    rules: list[Rule] = Field(min_length=1, max_length=MAX_RULES)
+    selectors: dict[str, Selector]
+    decision_policy: DecisionPolicy
+
+    @model_validator(mode="after")
+    def _consistent(self) -> GuidelineDefinition:
+        ids = [r.rule_id for r in self.rules]
+        if len(set(ids)) != len(ids):
+            raise ValueError("rule ids must be unique")
+        keys = [r.key for r in self.rules]
+        if len(set(keys)) != len(keys):
+            raise ValueError("rule keys must be unique")
+        missing = sorted({s for r in self.rules for s in r.selectors_used()} - set(self.selectors))
+        if missing:
+            raise ValueError(f"rules reference unknown selectors: {missing}")
+        for (
+            r
+        ) in self.rules:  # a contribution no decision step ranks would be silently ignored: reject instead
+            for outcome in sorted(r.possible_contributions()):
+                if (
+                    outcome != "eligible"
+                    and self.decision_policy.matching_step(outcome, r.review_class) is None
+                ):
+                    raise ValueError(
+                        f"rule {r.rule_id} can contribute '{outcome}' (review_class={r.review_class}) but no decision step ranks it"  # noqa: E501
+                    )
+        return self
 
 
 class RuleValidationError(ValueError):
-    """Raised by `parse_rule_definition`; `.errors` is a list of {"field", "reason"} dicts safe to return to clients."""
+    """`.errors` is a list of {"field", "reason"} dicts safe to return to clients."""
 
     def __init__(self, errors: list[dict[str, str]]) -> None:
         super().__init__("; ".join(f"{e['field']}: {e['reason']}" for e in errors))
         self.errors = errors
 
 
-def _json_depth(value: Any, limit: int) -> bool:
-    """True when JSON nesting exceeds `limit` (iterative: never trips the recursion limit)."""
+def _json_depth_exceeds(value: Any, limit: int) -> bool:
     stack: list[tuple[Any, int]] = [(value, 1)]
     while stack:
         v, d = stack.pop()
@@ -353,21 +555,73 @@ def _json_depth(value: Any, limit: int) -> bool:
     return False
 
 
-def parse_rule_definition(raw: Any) -> RuleDefinition:
-    """Validate untrusted JSON into a RuleDefinition (the only way rule JSON enters the engine)."""
+def _errors(exc: ValidationError) -> list[dict[str, str]]:
+    return [
+        {"field": ".".join(str(p) for p in e["loc"]) or "$", "reason": e["msg"]}
+        for e in exc.errors(include_url=False, include_input=False)
+    ][:50]
+
+
+def _parse(model: type[BaseModel], raw: Any, what: str) -> Any:
     if not isinstance(raw, dict):
-        raise RuleValidationError([{"field": "$", "reason": "a rule definition must be a JSON object"}])
-    if _json_depth(raw, MAX_DEPTH * 3 + 6):
-        raise RuleValidationError([{"field": "$", "reason": "rule definition is nested too deeply"}])
+        raise RuleValidationError([{"field": "$", "reason": f"a {what} must be a JSON object"}])
+    if _json_depth_exceeds(raw, MAX_DEPTH * 3 + 8):
+        raise RuleValidationError([{"field": "$", "reason": f"{what} is nested too deeply"}])
     try:
-        return RuleDefinition.model_validate(raw)
+        return model.model_validate(raw)
     except ValidationError as exc:
-        raise RuleValidationError(
-            [
-                {"field": ".".join(str(p) for p in err["loc"]) or "$", "reason": err["msg"]}
-                for err in exc.errors(include_url=False, include_input=False)
-            ][:50]
-        ) from exc
+        raise RuleValidationError(_errors(exc)) from exc
+
+
+def parse_rule(raw: Any) -> Rule:
+    """Validate one untrusted rule object (selector references are checked at guideline level)."""
+    return _parse(Rule, raw, "rule")
+
+
+def parse_selector(raw: Any) -> Selector:
+    return _parse(Selector, raw, "selector")
+
+
+def parse_guideline_definition(
+    rules: list[Any], selectors: dict[str, Any], decision_policy: Any | None = None
+) -> GuidelineDefinition:
+    """Validate rules + selectors + decision policy together. Errors name the rule or selector at fault."""
+    problems: list[dict[str, str]] = []
+    parsed_rules: list[Rule] = []
+    for i, raw in enumerate(rules or []):
+        try:
+            parsed_rules.append(parse_rule(raw))
+        except RuleValidationError as exc:
+            label = raw.get("rule_id", i) if isinstance(raw, dict) else i
+            problems.extend(
+                {"field": f"rules.{label}.{e['field']}", "reason": e["reason"]} for e in exc.errors
+            )
+    parsed_selectors: dict[str, Selector] = {}
+    for name, raw in (selectors or {}).items():
+        if not re.match(_NAME_RE, str(name)):
+            problems.append({"field": f"selectors.{name}", "reason": "invalid selector name"})
+            continue
+        try:
+            parsed_selectors[name] = parse_selector(raw)
+        except RuleValidationError as exc:
+            problems.extend(
+                {"field": f"selectors.{name}.{e['field']}", "reason": e["reason"]} for e in exc.errors
+            )
+    policy = None
+    try:
+        policy = _parse(
+            DecisionPolicy,
+            decision_policy if decision_policy is not None else DEFAULT_DECISION_POLICY,
+            "decision policy",
+        )
+    except RuleValidationError as exc:
+        problems.extend({"field": f"decision_policy.{e['field']}", "reason": e["reason"]} for e in exc.errors)
+    if problems:
+        raise RuleValidationError(problems)
+    try:
+        return GuidelineDefinition(rules=parsed_rules, selectors=parsed_selectors, decision_policy=policy)
+    except ValidationError as exc:
+        raise RuleValidationError(_errors(exc)) from exc
 
 
 def canonical_json(data: Any) -> bytes:
@@ -378,4 +632,4 @@ def canonical_hash(data: Any) -> str:
     return hashlib.sha256(canonical_json(data)).hexdigest()
 
 
-KEY_RE = re.compile(r"^[a-z][a-z0-9_\-]{1,79}$")  # guideline_key / rule_key
+KEY_RE = re.compile(r"^[a-z][a-z0-9_\-]{1,79}$")  # guideline_key

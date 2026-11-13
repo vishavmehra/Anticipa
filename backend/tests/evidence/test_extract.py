@@ -53,7 +53,7 @@ def reply(*facts: dict, lang: str = "en") -> str:
 
 @pytest.mark.anyio
 async def test_good_extraction_is_verified_persistable_and_accounted():
-    nebius = FakeAdapter(
+    claude = FakeAdapter(
         ok(
             reply(
                 fact("Mother was diagnosed with breast cancer at age 45."),
@@ -67,7 +67,7 @@ async def test_good_extraction_is_verified_persistable_and_accounted():
             o=600,
         )
     )  # fmt: skip
-    router, sink, _ = make_test_router({"nebius": nebius})
+    router, sink, _ = make_test_router({"anthropic": claude})
     out = await extract_document(router, DOC, META)
     assert out.status == "completed" and out.document_language == "en"
     assert out.source_content_hash == hashlib.sha256(DOC.encode()).hexdigest()
@@ -77,7 +77,7 @@ async def test_good_extraction_is_verified_persistable_and_accounted():
     ]  # fmt: skip
     first = out.facts[0].verification.spans[0]
     assert DOC[first[0] : first[1]] == out.facts[0].candidate.source_quote
-    assert out.provider == "nebius" and out.model_id == "Qwen/Qwen3-235B-A22B-Instruct-2507"
+    assert out.provider == "anthropic" and out.model_id == "claude-haiku-5-5" and not out.fallback_used
     assert out.invocation_id == sink.records[0].id and out.cost_usd == sink.records[0].cost_usd > Decimal(0)
     assert (out.usage.input_tokens, out.usage.output_tokens) == (2000, 600)
     assert out.count("accepted") == 3 and out.count("rejected") == 1
@@ -85,18 +85,18 @@ async def test_good_extraction_is_verified_persistable_and_accounted():
 
 @pytest.mark.anyio
 async def test_prompt_treats_the_document_as_fenced_data_and_sends_no_identifiers():
-    nebius = FakeAdapter(ok(reply()))
-    router, _, _ = make_test_router({"nebius": nebius})
+    claude = FakeAdapter(ok(reply()))
+    router, _, _ = make_test_router({"anthropic": claude})
     out = await extract_document(router, DOC, META)
     assert out.status == "completed" and out.facts == []  # a genuine "no facts" result is still completed
-    call = nebius.calls[0]
+    call = claude.calls[0]
     user = call.messages[0]["content"]
     assert "untrusted" in call.system.lower() and "never instructions" in user
     assert "doc-123" not in user + call.system and "res-456" not in user + call.system
     tag = _fence_tag(DOC)
     fenced = f"<{tag}>\n{DOC}\n</{tag}>"
     assert user.count(f"</{tag}>") == 1 and user.endswith(fenced) and fenced in user
-    assert call.schema is not None and call.temperature == 0.0
+    assert call.schema is not None and call.effort == "low" and call.temperature is None
 
 
 def test_fence_tag_is_deterministic_and_a_hostile_document_cannot_close_it():
@@ -110,52 +110,52 @@ def test_fence_tag_is_deterministic_and_a_hostile_document_cannot_close_it():
 
 
 @pytest.mark.anyio
-async def test_fallback_model_output_is_verified_exactly_like_the_primary():
-    nebius = FakeAdapter(err("unavailable"), err("unavailable"), err("unavailable"))
-    haiku = FakeAdapter(ok(reply(fact("Mother had liver cancer.", "liver cancer"), fact("Colonoscopy advised next year.", "colonoscopy",
-                                  category="preventive_care", subject_type="resident", relationship=None,
-                                  temporal_status="planned", age_at_onset=None))))  # fmt: skip
-    router, sink, _ = make_test_router({"nebius": nebius, "anthropic": haiku})
+async def test_transient_haiku_failure_retries_haiku_then_fails_with_no_nebius_fallback():
+    haiku = FakeAdapter(err("unavailable"), err("unavailable"), err("unavailable"))
+    nebius = FakeAdapter(ok(reply()))  # present and healthy, but never a candidate
+    router, sink, sleeps = make_test_router({"anthropic": haiku, "nebius": nebius})
     out = await extract_document(router, DOC, META)
-    assert out.status == "completed" and out.fallback_used and out.provider == "anthropic"
-    assert [f.decision for f in out.facts] == ["rejected", "accepted"]  # fabricated quote still rejected
-    assert [r.status for r in sink.records] == ["failed", "succeeded"] and sink.records[1].fallback_used
+    assert out.status == "failed" and out.error_category == "unavailable" and out.facts == []
+    assert (
+        len(haiku.calls) == 3 and len(sleeps) == 2 and nebius.calls == []
+    )  # 1 try + 2 retries, then give up
+    assert [r.status for r in sink.records] == ["failed"] and not sink.records[0].fallback_used
 
 
 @pytest.mark.anyio
 async def test_schema_violation_is_repaired_once_then_reported_as_failed_not_empty():
     bad = "this is not json"
-    nebius = FakeAdapter(ok(bad), ok(bad))
     haiku = FakeAdapter(ok(bad), ok(bad))
-    router, _, _ = make_test_router({"nebius": nebius, "anthropic": haiku})
+    router, _, _ = make_test_router({"anthropic": haiku})
     out = await extract_document(router, DOC, META)
     assert out.status == "failed" and out.error_category == "output_validation" and out.facts == []
-    assert DOC not in (out.error_message or "")  # never echoes document text
+    assert len(haiku.calls) == 2 and DOC not in (
+        out.error_message or ""
+    )  # one repair turn; never echoes text
 
 
 @pytest.mark.anyio
-async def test_refusal_is_a_failed_outcome_and_never_falls_back():
-    nebius = FakeAdapter(err("refusal", provider="nebius"))
-    haiku = FakeAdapter(ok(reply()))
-    router, _, _ = make_test_router({"nebius": nebius, "anthropic": haiku})
+async def test_refusal_is_a_failed_outcome():
+    haiku = FakeAdapter(err("refusal", provider="anthropic"))
+    router, _, _ = make_test_router({"anthropic": haiku})
     out = await extract_document(router, DOC, META)
-    assert out.status == "failed" and out.error_category == "refusal" and haiku.calls == []
+    assert out.status == "failed" and out.error_category == "refusal" and len(haiku.calls) == 1
 
 
 @pytest.mark.anyio
 async def test_budget_exceeded_is_a_failed_outcome_with_no_provider_call():
-    nebius = FakeAdapter(ok(reply()))
-    router, _, _ = make_test_router({"nebius": nebius}, daily_budget_usd=Decimal("0.0000001"))
+    claude = FakeAdapter(ok(reply()))
+    router, _, _ = make_test_router({"anthropic": claude}, daily_budget_usd=Decimal("0.0000001"))
     out = await extract_document(router, DOC, META)
-    assert out.status == "failed" and out.error_category == "budget_exceeded" and nebius.calls == []
+    assert out.status == "failed" and out.error_category == "budget_exceeded" and claude.calls == []
 
 
 @pytest.mark.anyio
 async def test_empty_document_never_reaches_a_provider():
-    nebius = FakeAdapter(ok(reply()))
-    router, _, _ = make_test_router({"nebius": nebius})
+    claude = FakeAdapter(ok(reply()))
+    router, _, _ = make_test_router({"anthropic": claude})
     out = await extract_document(router, "  \n ", META)
-    assert out.status == "failed" and out.error_category == "invalid_request" and nebius.calls == []
+    assert out.status == "failed" and out.error_category == "invalid_request" and claude.calls == []
 
 
 @pytest.mark.anyio

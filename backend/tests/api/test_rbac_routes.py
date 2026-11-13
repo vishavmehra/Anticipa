@@ -15,7 +15,10 @@ DUMMY_ID = "00000000-0000-4000-8000-000000000001"
 # POST endpoints that only compute and persist nothing (guarded by a *.view permission, so the observer may
 # call
 # them). Adding to this list needs a reviewer's justification.
-READ_ONLY_POSTS = {("POST", "/api/v1/rules/validate")}
+# POST /ask is a natural language read: it runs read-only aggregate tools and one audit event
+# (ask.query), changes no product data, and is guarded by analytics.view (ADR-069); a positive
+# observer test lives in tests/ask/test_tools_api.py.
+READ_ONLY_POSTS = {("POST", "/api/v1/rules/validate"), ("POST", "/api/v1/ask")}
 
 
 def mutating_routes(app):

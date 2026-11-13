@@ -3,11 +3,11 @@ import type { ReactNode } from "react";
 type Tone = "ok" | "warn" | "danger" | "info" | "neutral";
 
 const TONE: Record<Tone, string> = {
-  ok: "text-ok bg-ok-bg border-ok",
-  warn: "text-warn bg-warn-bg border-warn",
-  danger: "text-danger bg-danger-bg border-danger",
-  info: "text-info bg-info-bg border-info",
-  neutral: "text-neutral bg-neutral-bg border-neutral",
+  ok: "text-ok bg-ok-bg",
+  warn: "text-warn bg-warn-bg",
+  danger: "text-danger bg-danger-bg",
+  info: "text-info bg-info-bg",
+  neutral: "text-neutral bg-neutral-bg",
 };
 
 // Shape + label + colour: status is never conveyed by colour alone.
@@ -70,9 +70,9 @@ const MAP: Record<string, { label: string; tone: Tone; icon: keyof typeof ICON }
   uncertain: { label: "Uncertain", tone: "warn", icon: "bang" },
   conditional: { label: "Conditional", tone: "warn", icon: "half" },
   // guideline versions, care-gap cases and allocations
-  draft: { label: "Draft", tone: "neutral", icon: "dotted" },
-  review: { label: "In review", tone: "warn", icon: "half" },
-  in_review: { label: "In review", tone: "warn", icon: "half" },
+  draft: { label: "Not yet submitted", tone: "neutral", icon: "dotted" },
+  review: { label: "Awaiting approval", tone: "warn", icon: "half" },
+  in_review: { label: "Awaiting approval", tone: "warn", icon: "half" },
   approved: { label: "Approved", tone: "ok", icon: "check" },
   retired: { label: "Retired", tone: "neutral", icon: "slash" },
   pending_review: { label: "Pending review", tone: "warn", icon: "bang" },
@@ -80,6 +80,20 @@ const MAP: Record<string, { label: string; tone: Tone; icon: keyof typeof ICON }
   awaiting_capacity: { label: "Awaiting capacity", tone: "warn", icon: "half" },
   open: { label: "Open", tone: "ok", icon: "check" },
   closed: { label: "Closed", tone: "neutral", icon: "slash" },
+  // evaluation gates and metric status (Docs/09 §12.2)
+  pass: { label: "Pass", tone: "ok", icon: "check" },
+  fail: { label: "Fail", tone: "danger", icon: "cross" },
+  warn: { label: "Warn", tone: "warn", icon: "bang" },
+  not_evaluated: { label: "Not evaluated", tone: "neutral", icon: "dotted" },
+  skipped: { label: "Skipped", tone: "neutral", icon: "slash" },
+  measured: { label: "Measured", tone: "info", icon: "check" },
+  replayed: { label: "Replayed", tone: "info", icon: "dotted" },
+  projected: { label: "Projected", tone: "warn", icon: "half" },
+  not_applicable: { label: "Not applicable", tone: "neutral", icon: "circle" },
+  insufficient_samples: { label: "Too few samples", tone: "warn", icon: "bang" },
+  complete: { label: "Complete", tone: "ok", icon: "check" },
+  partial: { label: "Partial", tone: "warn", icon: "half" },
+  verified: { label: "Verified", tone: "ok", icon: "check" },
   identified: { label: "Identified", tone: "neutral", icon: "circle" },
   planned: { label: "Planned", tone: "info", icon: "half" },
   outreach_pending: { label: "Outreach pending", tone: "info", icon: "dotted" },
@@ -106,7 +120,7 @@ export function StatusBadge({ status }: { status: string }) {
   return (
     <span
       data-status={key}
-      className={`inline-flex items-center gap-1 rounded-sm border px-1.5 text-xs font-medium leading-5 whitespace-nowrap ${TONE[m.tone]}`}
+      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold leading-5 whitespace-nowrap ${TONE[m.tone]}`}
     >
       <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
         {ICON[m.icon]}

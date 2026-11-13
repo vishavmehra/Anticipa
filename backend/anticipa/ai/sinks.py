@@ -58,6 +58,10 @@ class InvocationSink(Protocol):
         """Recorded spend since 00:00 UTC today (read by the router's daily budget guard)."""
         ...
 
+    async def spent_total_usd(self, provider: str | None = None) -> Decimal:
+        """Lifetime recorded spend, optionally for one provider (read by the per-provider credit guard)."""
+        ...
+
 
 class InMemorySink:
     def __init__(self, *, now: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:
@@ -67,6 +71,9 @@ class InMemorySink:
     async def spent_today_usd(self) -> Decimal:
         start = utc_day_start(self._now())
         return sum((r.cost_usd for r in self.records if r.created_at >= start), Decimal("0"))
+
+    async def spent_total_usd(self, provider: str | None = None) -> Decimal:
+        return sum((r.cost_usd for r in self.records if provider in (None, r.provider)), Decimal("0"))
 
     async def record(self, rec: InvocationRecord) -> None:
         self.records.append(rec)
@@ -90,6 +97,20 @@ class DbSink:
 
     async def spent_today_usd(self) -> Decimal:
         return await asyncio.to_thread(self._spent_today)
+
+    async def spent_total_usd(self, provider: str | None = None) -> Decimal:
+        return await asyncio.to_thread(self._spent_total, provider)
+
+    def _spent_total(self, provider: str | None) -> Decimal:
+        from sqlalchemy import func, select
+
+        from anticipa.ai.models import ModelInvocation  # lazy: owned by the foundation workstream
+
+        stmt = select(func.coalesce(func.sum(ModelInvocation.cost_usd), 0))
+        if provider is not None:
+            stmt = stmt.where(ModelInvocation.provider == provider)
+        with self._session_factory() as session:
+            return Decimal(str(session.execute(stmt).scalar_one()))
 
     def _spent_today(self) -> Decimal:
         from sqlalchemy import func, select

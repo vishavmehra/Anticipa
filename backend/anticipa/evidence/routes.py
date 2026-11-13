@@ -17,25 +17,46 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
-from sqlalchemy import select
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from anticipa.ai import EmbedRequest, RouterError
+from anticipa.ai.config import load_config
 from anticipa.ai.models import ModelInvocation
+from anticipa.ai.settings import get_ai_settings
 from anticipa.api.deps import PageDep, SessionDep
 from anticipa.api.envelope import Envelope, PagedEnvelope, ok, paged, paginate
 from anticipa.core import audit
 from anticipa.core.auth import CurrentUser, require_any_permission, require_permission
-from anticipa.core.errors import NotFound, ProviderUnavailable, RateLimited, ValidationFailed
+from anticipa.core.errors import (
+    Conflict,
+    Forbidden,
+    NotFound,
+    ProviderUnavailable,
+    RateLimited,
+    ValidationFailed,
+)
 from anticipa.core.models import AuditEvent
 from anticipa.core.rbac import AUDIT_VIEW, EVIDENCE_REVIEW, EVIDENCE_VIEW, PROCESSING_EXECUTE
 from anticipa.datafabric.models import Document, DocumentChunk, Resident
 from anticipa.evidence import service
+from anticipa.evidence.chunking import Chunk, chunk_text
+from anticipa.evidence.cohort import (
+    MAX_COHORT_RESIDENTS,
+    cohort_key,
+    default_cohort_id,
+    docgen_difficult_residents,
+    load_manifest,
+    save_manifest,
+    select_cohort,
+)
+from anticipa.evidence.estimate import escalation_cap, estimate_extraction
 from anticipa.evidence.extract import PROMPT_REF
 from anticipa.evidence.models import (
     ASSERTION_STATUSES,
@@ -166,29 +187,47 @@ class ReviewResult(BaseModel):
 
 class ExtractionJobIn(service.ExtractionScope):
     idempotency_key: str | None = Field(None, max_length=200)
+    dry_run: bool = False  # return the scope check and the cost estimate; queue nothing
 
 
 class EmbeddingJobIn(service.EmbeddingScope):
     idempotency_key: str | None = Field(None, max_length=200)
+    dry_run: bool = False
 
 
 class JobSubmitted(BaseModel):
-    job_id: uuid.UUID
+    job_id: uuid.UUID | None
     job_type: str
     status: str
     created: bool
     document_count: int
+    dry_run: bool = False
+    override_cohort: bool = False
+    estimate: dict[str, Any] | None = None
+
+
+class CohortIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    seed: int = Field(ge=0, le=2**31 - 1)
+    size: int = Field(MAX_COHORT_RESIDENTS, ge=1, le=MAX_COHORT_RESIDENTS)  # fixed at 10,000 by the owner
+    dataset_version: str | None = Field(None, max_length=100)
+    difficult_share: float = Field(0.20, ge=0, le=0.5)
+    include_difficult: bool = (
+        True  # reserve a share for residents whose documents carry planted difficult cases
+    )
+    cohort_id: str | None = Field(None, max_length=90)
 
 
 class SearchHit(BaseModel):
-    chunk_id: uuid.UUID
+    chunk_id: uuid.UUID | None  # None for full-text hits (chunks are cut on the fly, not stored)
     document_id: uuid.UUID
     resident_id: uuid.UUID
     chunk_index: int
     start_offset: int
     end_offset: int
     text: str | None
-    score: float  # cosine similarity
+    score: float  # cosine similarity (semantic) or ts_rank_cd (full text)
     document_type: str
     language: str | None
     synthetic_status: str
@@ -197,7 +236,12 @@ class SearchHit(BaseModel):
 class SearchOut(BaseModel):
     retrieval_only: bool = True
     notice: str = RETRIEVAL_NOTICE
-    query_model: str
+    mode: Literal["fulltext", "semantic"]
+    match: str | None = None  # full text: all_terms | any_term
+    query_model: str | None = None
+    semantic_available: bool
+    scanned_documents: int | None = None
+    truncated: bool = False
     hits: list[SearchHit]
 
 
@@ -371,11 +415,15 @@ def resident_evidence(
 
 
 # ---------------------------------------------------------------------------------------------- search
+FTS_SCAN_DOCUMENTS = 500  # unscoped full-text search reads at most this many documents (resident-scoped: all)
+
+
 def _ai_router(request: Request) -> Any:
-    """One Model Router per API process, writing to model_invocations and enforcing the daily budget."""
+    """One Model Router per API process (query embeddings only), writing to model_invocations. The Nebius
+    credit ledger and the enabled-provider gate live in the router itself."""
     r = getattr(request.app.state, "ai_router", None)
     if r is None:
-        r = service.make_router(request.app.state.sessionmaker)
+        r = service.make_router(request.app.state.sessionmaker, run_budget=False)
         request.app.state.ai_router = r
     return r
 
@@ -386,6 +434,15 @@ def _read_slice(storage_key: str, start: int, end: int) -> str | None:
     except Exception:  # noqa: BLE001 - the store may be absent in a minimal deployment; text is optional
         log.warning("document text unavailable for a search hit", exc_info=True)
         return None
+
+
+def _embeddings_exist(session: Session, resident_id: uuid.UUID | None) -> bool:
+    stmt = select(DocumentChunk.id).where(DocumentChunk.embedding.is_not(None)).limit(1)
+    if resident_id is not None:
+        stmt = stmt.join(Document, Document.id == DocumentChunk.document_id).where(
+            Document.resident_id == resident_id
+        )
+    return session.execute(stmt).first() is not None
 
 
 def _search(
@@ -426,33 +483,133 @@ def _search(
     ]
 
 
+_FTS_AND = text(
+    "SELECT u.i AS i, ts_rank_cd(to_tsvector('simple', u.t), q.q) AS rank "
+    "FROM unnest(CAST(:texts AS text[])) WITH ORDINALITY AS u(t, i), plainto_tsquery('simple', :q) AS q(q) "
+    "WHERE to_tsvector('simple', u.t) @@ q.q ORDER BY rank DESC, u.i LIMIT :limit"
+)
+# Same tokenisation (PostgreSQL's own parser), terms OR-ed instead of AND-ed: used when no chunk has
+# every term.
+_FTS_OR = text(
+    "SELECT u.i AS i, ts_rank_cd(to_tsvector('simple', u.t), q.q) AS rank "
+    "FROM unnest(CAST(:texts AS text[])) WITH ORDINALITY AS u(t, i), "
+    "to_tsquery('simple', replace(plainto_tsquery('simple', :q)::text, '&', '|')) AS q(q) "
+    "WHERE to_tsvector('simple', u.t) @@ q.q ORDER BY rank DESC, u.i LIMIT :limit"
+)
+
+
+def _fulltext(
+    session: Session, q: str, resident_id: uuid.UUID | None, limit: int, scan_limit: int
+) -> tuple[list[SearchHit], str | None, int, bool]:
+    """Deterministic PostgreSQL full-text search over document chunks. The 'simple' configuration does
+    no stemming
+    and drops no stop words, so it behaves the same for English, Hindi and Arabic. Chunks are cut on the
+    fly with
+    their offsets (no stored text, no embeddings, no provider call); PostgreSQL tokenises and ranks them."""
+    stmt = select(
+        Document.id, Document.resident_id, Document.document_type, Document.language, Document.storage_key,
+        Document.synthetic_status,
+    ).order_by(Document.id).limit(scan_limit + 1)  # fmt: skip
+    if resident_id is not None:
+        stmt = stmt.where(Document.resident_id == resident_id)
+    docs = session.execute(stmt).all()
+    truncated = len(docs) > scan_limit
+    docs = docs[:scan_limit]
+    store = service.get_store()
+    cuts: list[tuple[Any, Chunk, str]] = []
+    for d in docs:
+        try:
+            doc_text = store.read_text(d.storage_key)
+        except Exception:  # noqa: BLE001 - one unreadable document must not break search
+            log.warning("full-text search skipped an unreadable document")
+            continue
+        cuts.extend((d, c, doc_text) for c in chunk_text(doc_text))
+    if not cuts:
+        return [], None, len(docs), truncated
+    texts = [c.text for _, c, _ in cuts]
+    match, rows = "all_terms", session.execute(_FTS_AND, {"texts": texts, "q": q, "limit": limit}).all()
+    if not rows:
+        match, rows = "any_term", session.execute(_FTS_OR, {"texts": texts, "q": q, "limit": limit}).all()
+    hits = []
+    for r in rows:
+        d, c, _ = cuts[r.i - 1]  # WITH ORDINALITY is 1-based
+        hits.append(
+            SearchHit(
+                chunk_id=None,
+                document_id=d.id,
+                resident_id=d.resident_id,
+                chunk_index=c.index,
+                start_offset=c.start,
+                end_offset=c.end,
+                text=c.text,
+                score=round(float(r.rank), 6),
+                document_type=d.document_type,
+                language=d.language,
+                synthetic_status=d.synthetic_status,
+            )
+        )
+    return hits, (match if hits else None), len(docs), truncated
+
+
 @router.get(
     "/evidence/search",
     response_model=Envelope[SearchOut],
-    summary="Semantic chunk retrieval (never eligibility)",
+    summary="Chunk retrieval: full-text by default, semantic only when opted in (never eligibility)",
 )
 async def search_evidence(
     request: Request,
     session: SessionDep,
-    _view: ViewUser,
-    _ai: AiUser,
+    user: ViewUser,
     q: Annotated[str, Query(min_length=2, max_length=500)],
     resident_id: uuid.UUID | None = None,
+    mode: Annotated[Literal["auto", "fulltext", "semantic"], Query()] = "auto",
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
 ):
+    """`auto` = semantic when Nebius is enabled, embeddings exist and the caller may trigger AI, else
+    full text.
+    The app works fully without Nebius; full text never calls a provider (so every `*.view` role can use
+    it)."""
+    enabled = "nebius" in get_ai_settings().enabled_providers
+    may_trigger_ai = user.can(EVIDENCE_REVIEW) or user.can(PROCESSING_EXECUTE)
+    have_vectors = enabled and await run_in_threadpool(_embeddings_exist, session, resident_id)
+    if mode == "semantic":
+        if not enabled:
+            raise Conflict(
+                "Semantic search is disabled (opt in with ANTICIPA_ENABLE_NEBIUS=1); use mode=fulltext."
+            )
+        if not may_trigger_ai:
+            raise Forbidden()
+        if not have_vectors:
+            raise Conflict("No embeddings exist for this scope; use mode=fulltext.")
+    semantic = mode == "semantic" or (mode == "auto" and have_vectors and may_trigger_ai)
+    if not semantic:
+        hits, match, scanned, truncated = await run_in_threadpool(
+            _fulltext, session, q, resident_id, limit, FTS_SCAN_DOCUMENTS
+        )
+        return ok(
+            request,
+            SearchOut(
+                mode="fulltext",
+                match=match,
+                semantic_available=bool(have_vectors),
+                scanned_documents=scanned,
+                truncated=truncated,
+                hits=hits,
+            ),
+        )  # fmt: skip
     try:
         res = await _ai_router(request).embed(
             EmbedRequest(task="embedding.document", texts=[q], metadata={"purpose": "evidence_search"})
         )
     except RouterError as e:
         if e.category == "budget_exceeded":
-            raise RateLimited(
-                "The daily AI budget is exhausted; search is unavailable until tomorrow (UTC)."
-            ) from None
+            raise RateLimited("The AI budget or Nebius credit limit is reached; use mode=fulltext.") from None
         log.warning("search embedding failed: %s", e.category)
-        raise ProviderUnavailable("The embedding provider is unavailable.") from None
+        raise ProviderUnavailable("The embedding provider is unavailable; use mode=fulltext.") from None
     hits = await run_in_threadpool(_search, session, res.vectors[0], resident_id, limit)
-    return ok(request, SearchOut(query_model=res.model_id, hits=hits))
+    return ok(
+        request, SearchOut(mode="semantic", query_model=res.model_id, semantic_available=True, hits=hits)
+    )
 
 
 # ------------------------------------------------------------------------------------------------ detail
@@ -587,6 +744,90 @@ def review_evidence(
     )
 
 
+# ------------------------------------------------------------------------------------------------- cohort
+def _cohort_scope(session: Session, body: service.DocumentSelector) -> list[uuid.UUID] | None:
+    """The cohort's residents (None with the override); explicit ids outside the cohort are refused."""
+    residents = service.load_cohort_residents(body, service.get_store())
+    if residents is not None:
+        stray = service.outside_cohort(session, body, residents)
+        if stray:
+            raise ValidationFailed(
+                f"{stray} selected document(s)/resident(s) are outside AI cohort {body.cohort_id!r}; "
+                "pass override_cohort=true (audited) to go beyond the cohort."
+            )
+    return residents
+
+
+@router.post(
+    "/evidence/cohorts",
+    response_model=Envelope[dict[str, Any]],
+    summary="Create (or re-read) the fixed AI cohort manifest: seeded, stratified, at most 10,000 residents",
+)
+def create_cohort(
+    body: CohortIn, request: Request, response: Response, session: SessionDep, user: ExecuteUser
+):
+    cohort_id = body.cohort_id or default_cohort_id(body.seed, body.size, body.dataset_version)
+    try:
+        cohort_key(cohort_id)
+    except ValueError as e:
+        raise ValidationFailed(str(e)) from None
+    store = service.get_store()
+    try:
+        existing = load_manifest(store, cohort_id)
+    except FileNotFoundError:
+        existing = None
+    except ValueError as e:
+        raise Conflict(str(e)) from None
+    difficult = (
+        docgen_difficult_residents(body.dataset_version)
+        if body.include_difficult and body.dataset_version
+        else None
+    )
+    manifest = select_cohort(
+        session,
+        seed=body.seed,
+        size=body.size,
+        dataset_version=body.dataset_version,
+        difficult_resident_ids=difficult,
+        difficult_share=body.difficult_share,
+        cohort_id=cohort_id,
+        now=existing.created_at if existing else None,
+    )
+    if existing is not None:
+        if existing.resident_ids_sha256 != manifest.resident_ids_sha256:
+            raise Conflict(
+                f"Cohort {cohort_id!r} already exists with a different resident list "
+                "(the population changed). "
+                "Choose a new cohort_id; a registered cohort is never silently replaced."
+            )
+        response.status_code = 200
+        return ok(request, existing.summary())
+    save_manifest(store, manifest)
+    audit.record(
+        session, user.actor, "evidence.cohort.create", "ai_cohort", cohort_id, "success",
+        {"size": manifest.size, "seed": manifest.seed, "sha256": manifest.resident_ids_sha256,
+         "dataset_version": manifest.dataset_version, "difficult_count": manifest.difficult_count},
+    )  # fmt: skip
+    session.commit()
+    response.status_code = 201
+    return ok(request, manifest.summary())
+
+
+@router.get(
+    "/evidence/cohorts/{cohort_id}",
+    response_model=Envelope[dict[str, Any]],
+    summary="AI cohort manifest summary",
+)
+def get_cohort(cohort_id: str, request: Request, _user: ViewUser):
+    try:
+        manifest = load_manifest(service.get_store(), cohort_id)
+    except FileNotFoundError:
+        raise NotFound("AI cohort not found.") from None
+    except ValueError as e:
+        raise ValidationFailed(str(e)) from None
+    return ok(request, manifest.summary())
+
+
 # ------------------------------------------------------------------------------------------------- jobs
 def _submit(
     request: Request,
@@ -599,18 +840,73 @@ def _submit(
     audit_action: str,
 ) -> Envelope[JobSubmitted]:
     if body.is_empty:
-        raise ValidationFailed("Select documents with document_ids, resident_ids or limit.")
-    scope = body.model_dump(mode="json", exclude={"idempotency_key"})
+        raise ValidationFailed("Select documents with cohort_id, document_ids, resident_ids or limit.")
+    settings = get_ai_settings()
+    if kind == "embed" and "nebius" not in settings.enabled_providers:
+        raise Conflict(
+            "Embeddings are disabled (opt in with ANTICIPA_ENABLE_NEBIUS=1); search uses full text."
+        )
+    residents = _cohort_scope(session, body)
     pending_only = not getattr(body, "force", False)
-    count = service.count_documents(session, body, kind=kind, pending_only=pending_only)
+    count = service.count_documents(session, body, kind=kind, pending_only=pending_only, residents=residents)
+    cfg = load_config()
+    if kind == "extract":
+        cohort_docs = (
+            service.count_documents(
+                session, service.DocumentSelector(), pending_only=False, residents=residents
+            )
+            if residents is not None
+            else count
+        )
+        estimate = estimate_extraction(
+            cfg,
+            count,
+            escalation_cap(cohort_docs, 0, settings.anticipa_ai_escalation_share) if body.escalate else 0,
+            run_budget=settings.anticipa_ai_run_budget_usd,
+        )
+        if not estimate["within_run_budget"]:
+            raise Conflict(
+                f"Expected cost ${estimate['expected_total_usd']} exceeds the per-run budget "
+                f"${settings.anticipa_ai_run_budget_usd} (ANTICIPA_AI_RUN_BUDGET_USD). "
+                "Split the run with `limit` or "
+                "raise the budget deliberately."
+            )
+    else:
+        estimate = service.estimate_embedding_scope(session, body, residents, service.get_store(), cfg)
+        approved = (
+            body.approve_cost_usd
+            if body.approve_cost_usd is not None
+            else settings.anticipa_nebius_run_approved_usd
+        )
+        if not body.dry_run and estimate["unique_texts_to_embed"]:
+            need = Decimal(estimate["estimated_cost_usd"])
+            if approved is None or approved < need:
+                raise Conflict(
+                    f"Cost approval required: estimate ${need} for "
+                    f"{estimate['unique_texts_to_embed']} unique texts "
+                    "(send approve_cost_usd >= estimate, or set ANTICIPA_NEBIUS_RUN_APPROVED_USD)."
+                )
+    log.info("%s submission estimate: %s", job_type, estimate)
+    if body.dry_run:
+        response.status_code = 200  # nothing was queued
+        return ok(
+            request,
+            JobSubmitted(
+                job_id=None,
+                job_type=job_type,
+                status="dry_run",
+                created=False,
+                document_count=count,
+                dry_run=True,
+                override_cohort=body.override_cohort,
+                estimate=estimate,
+            ),
+        )
+    scope = body.model_dump(mode="json", exclude={"idempotency_key", "dry_run"})
     result = submit_job(
-        session,
-        job_type,
-        scope,
-        body.idempotency_key,
-        created_by=user.id,
+        session, job_type, scope, body.idempotency_key, created_by=user.id,
         config_version=PROMPT_REF if kind == "extract" else None,
-    )
+    )  # fmt: skip
     if result.created:
         audit.record(
             session,
@@ -619,27 +915,45 @@ def _submit(
             "processing_job",
             result.job.id,
             "success",
-            {"documents": count, "route": scope.get("route"), "force": scope.get("force", False)},
+            {
+                "documents": count,
+                "cohort_id": body.cohort_id,
+                "override_cohort": body.override_cohort,
+                "force": scope.get("force", False),
+                "estimate": {
+                    k: estimate.get(k) for k in ("expected_total_usd", "estimated_cost_usd") if k in estimate
+                },
+            },
         )
+        if body.override_cohort:  # going beyond the fixed AI cohort is its own audited event
+            audit.record(
+                session,
+                user.actor,
+                "evidence.cohort.override",
+                "processing_job",
+                result.job.id,
+                "success",
+                {"job_type": job_type, "documents": count},
+            )
+            log.warning(
+                "AI cohort override used: job=%s type=%s documents=%s", result.job.id, job_type, count
+            )
     session.commit()
     response.status_code = 202 if result.created else 200
     return ok(
         request,
         JobSubmitted(
-            job_id=result.job.id,
-            job_type=job_type,
-            status=result.job.status,
-            created=result.created,
-            document_count=count,
+            job_id=result.job.id, job_type=job_type, status=result.job.status, created=result.created,
+            document_count=count, override_cohort=body.override_cohort, estimate=estimate,
         ),
-    )
+    )  # fmt: skip
 
 
 @router.post(
     "/evidence/extraction-jobs",
     response_model=Envelope[JobSubmitted],
     status_code=202,
-    summary="Queue an evidence extraction job",
+    summary="Queue an evidence extraction job on the AI cohort (Haiku; <= 10% Sonnet escalation)",
 )
 def submit_extraction(
     body: ExtractionJobIn, request: Request, response: Response, session: SessionDep, user: ExecuteUser
@@ -660,7 +974,7 @@ def submit_extraction(
     "/evidence/embedding-jobs",
     response_model=Envelope[JobSubmitted],
     status_code=202,
-    summary="Queue a document embedding job",
+    summary="Queue an OPT-IN embedding job (Nebius: needs ANTICIPA_ENABLE_NEBIUS=1 and a cost approval)",
 )
 def submit_embedding(
     body: EmbeddingJobIn, request: Request, response: Response, session: SessionDep, user: ExecuteUser

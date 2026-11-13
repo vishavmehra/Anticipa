@@ -121,7 +121,8 @@ def _snapshot_hash(cases: Sequence[PlannableCase], pool_list: list[PoolSpec], us
     h.update(json.dumps(cfg.model_dump(mode="json"), sort_keys=True).encode())
     for c in sorted(cases, key=lambda c: c.case_id.int):
         opened = c.opened_at.isoformat() if c.opened_at else ""
-        h.update(f"c|{c.case_id}|{c.resident_id}|{c.service_key}|{c.priority}|{c.district_code}|{c.language}|{opened}\n".encode())
+        h.update(f"c|{c.case_id}|{c.resident_id}|{c.service_key}|{c.priority}|{c.district_code}|{c.language}|{opened}".encode())
+        h.update(b"|consent_denied\n" if c.consent_denied else b"\n")  # runs without opt-outs keep their hash
     for p in pool_list:
         h.update(f"p|{p.clinic_service_id}|{p.clinic_key}|{p.district_code}|{p.service_key}|{p.duration_minutes}\n".encode())
         for s in sorted(usable[p.clinic_service_id], key=lambda s: s.slot_id.int):
@@ -243,7 +244,10 @@ def plan(cases: Sequence[PlannableCase], pools: Sequence[PoolSpec], slots: Seque
     unallocated: list[Unallocated] = []
     buckets: dict[tuple[str, str, str, str], list[PlannableCase]] = defaultdict(list)
     for c in cases:
-        if not c.service_key or not c.district_code:
+        if c.consent_denied:  # opted out of every channel (ADR-070): explained, never planned
+            unallocated.append(Unallocated(c.case_id, "consent_denied",
+                "The resident opted out of every outreach channel, so no seat was planned.", {}))  # fmt: skip
+        elif not c.service_key or not c.district_code:
             unallocated.append(Unallocated(c.case_id, "invalid_case_data",
                 "Case has no service or no district, so it cannot be matched to a clinic.", {}))  # fmt: skip
         else:

@@ -11,7 +11,10 @@ Rules enforced here (CLAUDE.md §10, docs/17 §6):
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,20 +25,27 @@ from anticipa.core.errors import InvalidTransition, NotFound
 from anticipa.datafabric.models import Document, DocumentChunk
 from anticipa.evidence.extract import ExtractionOutcome
 from anticipa.evidence.models import EvidenceFact, EvidenceSource
+from anticipa.evidence.normalise import apply_to_value, normalise, section_heading
 
 EXTRACTION_METHOD = "ai_assisted"  # 04 §9.1: structured | ai_assisted | other
 MAX_DOCUMENTS_PER_JOB = 100_000
 MACHINE_REVIEW_STATES = ("not_required", "pending")  # review_status of facts a re-extraction may replace
 VERIFIED_STATUSES = ("verified_exact", "verified_normalized")
-# Family-history / ambiguous document types go to the stronger route in `auto` mode.
-COMPLEX_TYPE_MARKERS = ("family", "ambiguous")
 
 
 class DocumentSelector(BaseModel):
-    """Which documents a job covers. Explicit ids win; a bare `limit`/filter = "the next N unprocessed"."""
+    """Which documents a job covers. Explicit ids win; a bare `limit`/filter = "the next N unprocessed".
+
+    Every job is bound to a registered AI cohort (`cohort_id`, see anticipa.evidence.cohort): only
+    documents of
+    the cohort's residents may be processed. `override_cohort` lifts that, is audited at submission, and
+    is the
+    only way to go beyond the fixed 10,000-resident cohort."""
 
     model_config = ConfigDict(extra="forbid")
 
+    cohort_id: str | None = Field(None, max_length=90)
+    override_cohort: bool = False
     document_ids: list[uuid.UUID] = Field(default_factory=list, max_length=MAX_DOCUMENTS_PER_JOB)
     resident_ids: list[uuid.UUID] = Field(default_factory=list, max_length=MAX_DOCUMENTS_PER_JOB)
     document_type: str | None = Field(None, max_length=100)
@@ -44,17 +54,25 @@ class DocumentSelector(BaseModel):
 
     @property
     def is_empty(self) -> bool:
-        return not (self.document_ids or self.resident_ids or self.limit)
+        return not (self.document_ids or self.resident_ids or self.limit or self.cohort_id)
 
 
 class ExtractionScope(DocumentSelector):
-    route: Literal["auto", "standard", "complex"] = "auto"
+    prompt_ref: str = Field(
+        "evidence.extract@1", pattern=r"^evidence\.extract@[0-9]+$"
+    )  # versioned prompt file
+    escalate: bool = (
+        True  # Haiku first; deterministic triggers may re-run <= 10% of cohort documents on Sonnet
+    )
     force: bool = False  # re-extract even when (document hash, prompt, model) was already processed
     concurrency: int = Field(8, ge=1, le=16)
 
 
 class EmbeddingScope(DocumentSelector):
     concurrency: int = Field(4, ge=1, le=8)
+    # Nebius spend approval (USD): must be >= the estimate computed from the selected texts. Falls back to
+    # ANTICIPA_NEBIUS_RUN_APPROVED_USD. The run hard-stops when this amount is reached.
+    approve_cost_usd: Decimal | None = Field(None, ge=0)
 
 
 @dataclass(frozen=True)
@@ -81,20 +99,20 @@ _COLUMNS = (
 )
 
 
-def pick_task(document_type: str, route: str) -> str:
-    """Deterministic route choice; model output never influences it."""
-    if route == "complex" or (
-        route == "auto" and any(m in document_type.lower() for m in COMPLEX_TYPE_MARKERS)
-    ):
-        return "evidence.extract.complex"
-    return "evidence.extract"
-
-
-def _filter(stmt: Select, scope: DocumentSelector, *, kind: str, pending_only: bool) -> Select:
+def _filter(
+    stmt: Select,
+    scope: DocumentSelector,
+    *,
+    kind: str,
+    pending_only: bool,
+    residents: Sequence[uuid.UUID] | None,
+) -> Select:
     if scope.document_ids:
         stmt = stmt.where(Document.id.in_(scope.document_ids))
     if scope.resident_ids:
         stmt = stmt.where(Document.resident_id.in_(scope.resident_ids))
+    if residents is not None:  # the AI cohort: no document of any other resident is ever selected
+        stmt = stmt.where(Document.resident_id.in_(residents))
     if scope.document_type:
         stmt = stmt.where(Document.document_type == scope.document_type)
     if scope.language:
@@ -113,9 +131,16 @@ def _filter(stmt: Select, scope: DocumentSelector, *, kind: str, pending_only: b
 
 
 def count_documents(
-    session: Session, scope: DocumentSelector, *, kind: str = "extract", pending_only: bool = True
+    session: Session,
+    scope: DocumentSelector,
+    *,
+    kind: str = "extract",
+    pending_only: bool = True,
+    residents: Sequence[uuid.UUID] | None = None,
 ) -> int:
-    stmt = _filter(select(func.count(Document.id)), scope, kind=kind, pending_only=pending_only)
+    stmt = _filter(
+        select(func.count(Document.id)), scope, kind=kind, pending_only=pending_only, residents=residents
+    )
     n = session.execute(stmt).scalar_one()
     return min(n, scope.limit) if scope.limit else n
 
@@ -128,9 +153,10 @@ def select_documents(
     batch: int,
     kind: str = "extract",
     pending_only: bool = True,
+    residents: Sequence[uuid.UUID] | None = None,
 ) -> list[DocRow]:
     """Keyset page (ordered by id) of the documents in scope. kind: "extract" | "embed"."""
-    stmt = _filter(select(*_COLUMNS), scope, kind=kind, pending_only=pending_only)
+    stmt = _filter(select(*_COLUMNS), scope, kind=kind, pending_only=pending_only, residents=residents)
     stmt = stmt.order_by(Document.id).limit(batch)
     if after is not None:
         stmt = stmt.where(Document.id > after)
@@ -186,22 +212,34 @@ def persist_outcome(session: Session, doc: DocRow, outcome: ExtractionOutcome, t
     ).rowcount
     result = PersistResult(replaced=replaced)
     invocation_id = uuid.UUID(outcome.invocation_id) if outcome.invocation_id else None
+    try:
+        doc_date = date.fromisoformat(doc.created_on) if doc.created_on else None
+    except ValueError:
+        doc_date = None
     for vf in outcome.facts:
         c, ver = vf.candidate, vf.verification
         fact_id = uuid.uuid4()
         value = _fact_value(c)
         if vf.reasons:
             value["review_reasons"] = list(vf.reasons)
+        first = ver.spans[0] if ver.verified and ver.spans else None
+        norm = normalise(
+            c.category, c.temporal_status, c.assertion_status, c.fact_type, value, doc_date,
+            subject_type=c.subject_type, heading=section_heading(text, first[0]) if first else None,
+        )  # fmt: skip
+        value = apply_to_value(
+            value, norm, c.category, c.temporal_status
+        )  # keeps the model's originals auditable
         session.add(
             EvidenceFact(
                 id=fact_id,
                 resident_id=doc.resident_id,
                 subject_type=c.subject_type,
-                category=c.category,
+                category=norm.category,
                 fact_type=c.fact_type,
                 value=value,
                 assertion_status=c.assertion_status,
-                temporal_status=c.temporal_status,
+                temporal_status=norm.temporal_status,
                 relationship_type=c.relationship,
                 extraction_confidence=c.extraction_confidence,
                 uncertainty_note=c.uncertainty_note,
@@ -289,9 +327,122 @@ def get_store() -> Any:
     return get_document_store()
 
 
-def make_router(sessions: Any) -> Any:
-    """A Model Router that writes every invocation to model_invocations and enforces the daily budget."""
+def make_router(
+    sessions: Any, *, run_budget: bool | Decimal = True, initial_run_spend: Decimal = Decimal(0)
+) -> Any:
+    """A Model Router that writes every invocation to model_invocations, enforces the daily budget and
+    (for job
+    runs) the per-run budget, replays cached outputs, and only routes to enabled providers."""
     from anticipa.ai.router import build_router
     from anticipa.ai.sinks import DbSink
 
-    return build_router(sink=DbSink(sessions))
+    return build_router(sink=DbSink(sessions), run_budget=run_budget, initial_run_spend=initial_run_spend)
+
+
+# ------------------------------------------------------------------------------------------------- cohort
+def load_cohort_residents(scope: DocumentSelector, store: Any) -> list[uuid.UUID] | None:
+    """The residents a job may touch: the cohort manifest's list, or None when the (audited) override applies.
+
+    Raises ValidationFailed when no cohort is named and there is no override, NotFound for an unknown
+    cohort."""
+    from anticipa.core.errors import ValidationFailed
+    from anticipa.evidence.cohort import load_manifest
+
+    if scope.override_cohort:
+        return None
+    if not scope.cohort_id:
+        raise ValidationFailed(
+            "Name an AI cohort (cohort_id; create one with POST /evidence/cohorts) "
+            "or pass override_cohort=true."
+        )
+    try:
+        return load_manifest(store, scope.cohort_id).resident_ids
+    except FileNotFoundError:
+        raise NotFound(f"AI cohort {scope.cohort_id!r} does not exist.") from None
+    except ValueError as e:
+        raise ValidationFailed(str(e)) from None
+
+
+def outside_cohort(session: Session, scope: DocumentSelector, residents: Sequence[uuid.UUID]) -> int:
+    """How many explicitly selected documents/residents fall outside the cohort."""
+    n = 0
+    if scope.document_ids:
+        n += session.execute(
+            select(func.count(Document.id)).where(
+                Document.id.in_(scope.document_ids), Document.resident_id.not_in(residents)
+            )
+        ).scalar_one()
+    if scope.resident_ids:
+        n += len(set(scope.resident_ids) - set(residents))
+    return n
+
+
+# ------------------------------------------------------------------------------------- embedding estimate
+def estimate_embedding_scope(
+    session: Session,
+    scope: DocumentSelector,
+    residents: Sequence[uuid.UUID] | None,
+    store: Any,
+    cfg: Any,
+    *,
+    page: int = 200,
+) -> dict[str, Any]:
+    """Read-only twin of the embedding job's planning pass: which UNIQUE chunk texts still lack an
+    embedding for
+    this model, and what embedding them would cost (tokens estimated from the actual texts). No provider
+    call and
+    no write, so it is safe for a dry run and for the approval check at submission."""
+    from anticipa.evidence.chunking import chunk_text
+    from anticipa.evidence.estimate import estimate_embedding
+
+    route = cfg.tasks["embedding.document"]
+    model_id = route.candidates[0].model_id
+    unique: dict[str, str] = {}
+    documents = empty = unreadable = already = 0
+    after, selected = None, 0
+    while not (scope.limit and selected >= scope.limit):
+        n = min(page, scope.limit - selected) if scope.limit else page
+        rows = select_documents(session, scope, after=after, batch=n, kind="embed", residents=residents)
+        if not rows:
+            break
+        after, selected = rows[-1].id, selected + len(rows)
+        per_doc: list[list[Any]] = []
+        for doc in rows:
+            documents += 1
+            try:
+                chunks = chunk_text(store.read_text(doc.storage_key))
+            except Exception:  # noqa: BLE001 - the job marks it failed; the estimate just skips it
+                unreadable += 1
+                continue
+            if not chunks:
+                empty += 1
+            per_doc.append(chunks)
+        hashes = {c.content_hash for chunks in per_doc for c in chunks}
+        have = set()
+        if hashes:
+            have = set(
+                session.execute(
+                    select(DocumentChunk.content_hash)
+                    .where(
+                        DocumentChunk.content_hash.in_(hashes),
+                        DocumentChunk.embedding_model == model_id,
+                        DocumentChunk.embedding.is_not(None),
+                    )
+                    .distinct()
+                ).scalars()
+            )
+        for chunks in per_doc:
+            for c in chunks:
+                if c.content_hash in have:
+                    already += 1
+                else:
+                    unique.setdefault(c.content_hash, c.text)
+    est = estimate_embedding(cfg, list(unique.values()))
+    return {
+        **est,
+        "documents": documents,
+        "empty_documents": empty,
+        "unreadable_documents": unreadable,
+        "chunks_already_embedded": already,
+        "unique_texts_to_embed": len(unique),
+    }

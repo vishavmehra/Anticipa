@@ -57,6 +57,36 @@ def test_app_metadata_of_the_wrong_type_is_forbidden(mint_token, test_settings):
 
 
 @pytest.mark.parametrize(
+    "app_metadata",
+    [
+        {"provider": "google", "providers": ["google"]},
+        {"provider": "email", "providers": ["email", "google"]},
+    ],
+)
+def test_google_sign_in_without_role_is_read_only_observer(mint_token, test_settings, app_metadata):
+    user = authenticate_token(mint_token(None, app_metadata=app_metadata), test_settings)
+    assert user.role == "observer" and user.permissions == permissions_for("observer")
+
+
+def test_google_sign_in_keeps_an_explicit_role(mint_token, test_settings):
+    token = mint_token(None, app_metadata={"provider": "google", "anticipa_role": "care_coordinator"})
+    assert authenticate_token(token, test_settings).role == "care_coordinator"
+
+
+def test_google_fallback_skips_email_invalid_roles_and_disabled(mint_token, test_settings):
+    email_only = {"provider": "email", "providers": ["email"]}
+    for md in (email_only, {"provider": "google", "anticipa_role": "root"}):
+        with pytest.raises(Forbidden):
+            authenticate_token(mint_token(None, app_metadata=md), test_settings)
+    forged = mint_token(None, app_metadata={}, user_metadata={"provider": "google"})
+    with pytest.raises(Forbidden):  # user_metadata is user-writable: never trusted
+        authenticate_token(forged, test_settings)
+    off = test_settings.model_copy(update={"google_default_role": ""})
+    with pytest.raises(Forbidden):
+        authenticate_token(mint_token(None, app_metadata={"provider": "google"}), off)
+
+
+@pytest.mark.parametrize(
     "overrides",
     [
         {"aud": "anon"},

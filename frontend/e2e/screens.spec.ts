@@ -34,24 +34,30 @@ interface Screen {
   name: string;
   path: string;
   signedIn: boolean;
+  /** Role to sign in as. Defaults to population_admin; system pages need system_admin. */
+  role?: "population_admin" | "system_admin";
   ready: (p: Page) => Locator;
 }
 const SCREENS: Screen[] = [
   { name: "login", path: "/login", signedIn: false, ready: (p) => p.getByRole("heading", { name: "Sign in to Anticipa" }) },
-  { name: "population", path: "/", signedIn: true, ready: (p) => p.getByRole("heading", { name: "Processing coverage" }) },
-  { name: "residents", path: "/residents", signedIn: true, ready: (p) => p.getByRole("table", { name: "Residents" }).getByRole("row").nth(3) },
+  { name: "command-center", path: "/", signedIn: true, ready: (p) => p.getByRole("list", { name: "Open care gaps by priority" }) },
+  { name: "population", path: "/population", signedIn: true, ready: (p) => p.getByRole("heading", { level: 1 }) },
+  { name: "insights", path: "/insights", signedIn: true, ready: (p) => p.getByRole("heading", { level: 1 }) },
+  { name: "reports", path: "/reports", signedIn: true, ready: (p) => p.getByRole("heading", { level: 1 }) },
+  { name: "residents", path: "/residents", signedIn: true, ready: (p) => p.getByRole("list", { name: "Residents", exact: true }).getByRole("listitem").nth(2) },
   { name: "resident-detail", path: `/residents/${RES_ID}`, signedIn: true, ready: (p) => p.getByRole("article").nth(3) },
-  { name: "evidence-review", path: "/evidence-review", signedIn: true, ready: (p) => p.getByRole("article").nth(3) },
+  { name: "evidence-review", path: "/evidence-review", signedIn: true, ready: (p) => p.getByRole("article").first() },
   { name: "guidelines", path: "/guidelines", signedIn: true, ready: (p) => p.getByRole("table", { name: "Guidelines" }).getByRole("row").nth(3) },
   { name: "guideline-detail", path: `/guidelines/${GUIDELINE_ID}`, signedIn: true, ready: (p) => p.getByRole("table", { name: "Rules" }).getByRole("row").nth(1) },
-  { name: "care-gaps", path: "/care-gaps", signedIn: true, ready: (p) => p.getByRole("table", { name: "Care-gap cases" }).getByRole("row").nth(2) },
-  { name: "care-gap-detail", path: `/care-gaps/${CASE_ID}`, signedIn: true, ready: (p) => p.getByRole("list", { name: "Outreach history" }) },
+  { name: "care-gaps", path: "/care-gaps", signedIn: true, ready: (p) => p.getByRole("table", { name: "Care gap cases" }).getByRole("row").nth(2) },
+  { name: "care-gap-detail", path: `/care-gaps/${CASE_ID}`, signedIn: true, ready: (p) => p.getByRole("table", { name: "Completion evidence" }).getByRole("row").nth(1) },
   { name: "planning", path: "/planning", signedIn: true, ready: (p) => p.getByRole("table", { name: "Planning runs" }).getByRole("row").nth(1) },
-  { name: "engagement", path: "/engagement", signedIn: true, ready: (p) => p.getByRole("heading", { name: "Endpoint not yet available" }) },
-  { name: "jobs", path: "/jobs", signedIn: true, ready: (p) => p.getByRole("table", { name: "Background jobs" }).getByRole("row").nth(6) },
-  { name: "job-detail", path: `/jobs/${JOB_ID}`, signedIn: true, ready: (p) => p.getByRole("list", { name: "Job lifecycle" }) },
-  { name: "audit", path: "/audit", signedIn: true, ready: (p) => p.getByRole("table", { name: "Audit events" }).getByRole("row").nth(3) },
-  { name: "integrations", path: "/integrations", signedIn: true, ready: (p) => p.getByRole("table", { name: "Integration health" }).getByRole("row").nth(4) },
+  { name: "engagement", path: "/engagement", signedIn: true, ready: (p) => p.getByRole("table", { name: "Appointments", exact: true }).getByRole("row").nth(1) },
+  { name: "evaluation", path: "/evaluation", signedIn: true, ready: (p) => p.getByRole("table", { name: "Metrics" }).getByRole("row").nth(2) },
+  { name: "jobs", path: "/jobs", signedIn: true, role: "system_admin", ready: (p) => p.getByRole("table", { name: "Background jobs" }).getByRole("row").nth(6) },
+  { name: "job-detail", path: `/jobs/${JOB_ID}`, signedIn: true, role: "system_admin", ready: (p) => p.getByRole("list", { name: "Job lifecycle" }) },
+  { name: "audit", path: "/audit", signedIn: true, role: "system_admin", ready: (p) => p.getByRole("table", { name: "Audit events" }).getByRole("row").nth(3) },
+  { name: "integrations", path: "/integrations", signedIn: true, role: "system_admin", ready: (p) => p.getByRole("table", { name: "Integration health" }).getByRole("row").nth(4) },
   { name: "primitives", path: "/dev/primitives", signedIn: false, ready: (p) => p.getByRole("heading", { name: "Primitives" }) },
 ];
 
@@ -62,11 +68,12 @@ for (const { w, h } of WIDTHS) {
     for (const s of SCREENS) {
       test(`${s.name}: screenshot, axe, no horizontal scroll`, async ({ page, context }) => {
         if (s.signedIn) {
-          await mockSupabase(page, { role: "population_admin" });
-          await signIn(context, "population_admin");
+          const role = s.role ?? "population_admin";
+          await mockSupabase(page, { role });
+          await signIn(context, role);
           await mockApi(page, {
             ...MODULE_HANDLERS,
-            "GET /auth/me": () => ({ body: ok(meFor("population_admin")) }),
+            "GET /auth/me": () => ({ body: ok(meFor(s.role ?? "population_admin")) }),
             "GET /jobs": () => ({ body: paged(jobs, 1, 25, 4081) }),
             [`GET /jobs/${JOB_ID}`]: () => ({ body: ok(jobs[0]) }),
             [`GET /jobs/${JOB_ID}/progress`]: () => ({
@@ -79,12 +86,13 @@ for (const { w, h } of WIDTHS) {
         await page.goto(s.path);
         await expect(s.ready(page)).toBeVisible();
         if (s.name !== "primitives") await expect(page.locator(".skeleton")).toHaveCount(0); // every block has finished loading (the primitives page shows skeletons on purpose)
-        await expect(page.getByRole("note")).toHaveText("Synthetic data — not for clinical use");
+        await expect(page.getByRole("note")).toHaveCount(0); // owner decision: no synthetic banner
 
         await page.screenshot({ path: `test-results/screenshots/${s.name}-${w}.png`, fullPage: true });
 
         const scrollW = await page.evaluate(() => document.documentElement.scrollWidth);
-        expect(scrollW, "page must not scroll horizontally").toBeLessThanOrEqual(w);
+        const wide = scrollW > w ? await page.evaluate((limit) => [...document.querySelectorAll("body *")].filter((e) => e.getBoundingClientRect().right > limit + 0.5).slice(0, 6).map((e) => `${e.tagName}.${String((e as HTMLElement).className).slice(0, 60)}@${Math.round(e.getBoundingClientRect().right)}`).join(" | "), w) : "";
+        expect(scrollW, `page must not scroll horizontally. Wide: ${wide}`).toBeLessThanOrEqual(w);
 
         const axe = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]).analyze();
         expect(axe.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`)).toEqual([]);
@@ -100,12 +108,12 @@ test.describe("phone navigation", () => {
     await signIn(context, "population_admin");
     await mockApi(page, { "GET /auth/me": () => ({ body: ok(meFor("population_admin")) }) });
     await page.goto("/");
-    const menu = page.getByRole("button", { name: "Menu" });
+    const menu = page.getByRole("button", { name: "Menu", exact: true });
     await expect(menu).toHaveAttribute("aria-expanded", "false");
-    await expect(page.getByRole("link", { name: "Jobs" })).toBeHidden();
+    await expect(page.getByRole("link", { name: "Residents" })).toBeHidden();
     await menu.click();
     await expect(page.getByRole("button", { name: "Close menu" })).toHaveAttribute("aria-expanded", "true");
-    await expect(page.getByRole("link", { name: "Jobs" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Residents" })).toBeVisible();
     await page.screenshot({ path: "test-results/screenshots/menu-open-390.png", fullPage: true });
   });
 });

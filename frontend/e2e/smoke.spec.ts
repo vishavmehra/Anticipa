@@ -14,7 +14,6 @@ import {
   type TestRole,
 } from "./helpers";
 
-const BANNER = "Synthetic data — not for clinical use";
 const JOB_ID = "aaaaaaaa-0000-4000-8000-000000000001";
 const FAILED_ID = "aaaaaaaa-0000-4000-8000-000000000002";
 const tokenOf = (marker: string) => `Bearer ${sessionFor("population_admin", marker).access_token}`;
@@ -37,7 +36,12 @@ const progress = (over: Record<string, unknown> = {}) => ({
 async function boot(page: Page, context: BrowserContext, role: TestRole, handlers: Record<string, ApiHandler> = {}) {
   const supabase = await mockSupabase(page, { role });
   await signIn(context, role);
-  const api = await mockApi(page, { "GET /auth/me": () => ({ body: ok(meFor(role)) }), ...handlers });
+  // The shell calls these two on every page (bell badge and district scope pill).
+  const shell = {
+    "GET /analytics/alerts/summary": () => ({ body: ok({ alerts_active: 0, by_severity: {}, items: [] }) }),
+    "GET /meta/scope": () => ({ body: ok({ country: { code: "IN", name: "India" }, states: [], districts: [] }) }),
+  };
+  const api = await mockApi(page, { "GET /auth/me": () => ({ body: ok(meFor(role)) }), ...shell, ...handlers });
   return { supabase, api };
 }
 
@@ -53,7 +57,7 @@ test.describe("auth and shell", () => {
     await expect(page.getByRole("heading", { name: "Sign in to Anticipa" })).toBeVisible();
     await expect(page.getByLabel("Email")).toBeVisible();
     await expect(page.getByLabel("Password")).toBeVisible();
-    await expect(page.getByRole("note")).toHaveText(BANNER);
+    await expect(page.getByRole("note")).toHaveCount(0); // owner decision: no synthetic banner
     await expect(page.getByText(/sign up|create account|register/i)).toHaveCount(0);
   });
 
@@ -64,7 +68,7 @@ test.describe("auth and shell", () => {
     await page.getByLabel("Email").fill("admin@example.test");
     await page.getByLabel("Password").fill("correct horse");
     await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: "Jobs" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: "Residents" })).toBeVisible();
     expect(calls.passwordBodies).toEqual([{ email: "admin@example.test", password: "correct horse", gotrue_meta_security: {} }]);
   });
 
@@ -87,20 +91,20 @@ test.describe("auth and shell", () => {
     await signIn(context, "population_admin");
     await mockApi(page, { "GET /auth/me": () => ({ ...errorBody("FORBIDDEN", "No role.", 403) }) });
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "No Anticipa role assigned" })).toBeVisible();
-    await expect(page.getByRole("note")).toHaveText(BANNER);
+    await expect(page.getByRole("heading", { name: "Access pending. Ask an administrator." })).toBeVisible();
+    await expect(page.getByRole("note")).toHaveCount(0); // owner decision: no synthetic banner
   });
 
   test("navigation follows permissions from /auth/me, not the role name", async ({ page, context }) => {
     await boot(page, context, "care_coordinator");
     await page.goto("/");
     const nav = page.getByRole("navigation", { name: "Primary" });
-    await expect(nav.getByRole("link", { name: "Population" })).toBeVisible();
-    await expect(nav.getByRole("link", { name: "Care Gaps" })).toBeVisible();
+    await expect(nav.getByRole("link", { name: "Command Center" })).toBeVisible();
+    await expect(nav.getByRole("link", { name: "Care gaps" })).toBeVisible();
     await expect(nav.getByRole("link", { name: "Jobs" })).toHaveCount(0);
-    await expect(nav.getByRole("link", { name: "Integrations" })).toBeVisible(); // rbac.py grants integrations.view to this role
-    await expect(nav.getByRole("link", { name: "Evidence Review" })).toHaveCount(0);
-    await expect(page.getByRole("note")).toHaveText(BANNER);
+    await expect(nav.getByRole("link", { name: "Integrations" })).toHaveCount(0); // system pages are not product navigation
+    await expect(nav.getByRole("link", { name: "Evidence review" })).toHaveCount(0);
+    await expect(page.getByRole("note")).toHaveCount(0); // owner decision: no synthetic banner
   });
 
   test("modules without an endpoint show an honest empty state", async ({ page, context }) => {
@@ -124,7 +128,7 @@ test.describe("auth and shell", () => {
 
 test.describe("jobs", () => {
   test("table renders mocked rows, bearer token, no CSRF header", async ({ page, context }) => {
-    const { api } = await boot(page, context, "population_admin", {
+    const { api } = await boot(page, context, "system_admin", {
       "GET /jobs": () => ({ body: paged(jobRows, 1, 25, 3) }),
     });
     await page.goto("/jobs");
@@ -133,7 +137,7 @@ test.describe("jobs", () => {
     await expect(table.locator("[data-status=running]")).toBeVisible();
     await expect(table.locator("[data-status=failed]")).toBeVisible();
     await expect(table.locator("[data-status=completed]")).toBeVisible();
-    await expect(page.getByText("1–3 of 3")).toBeVisible();
+    await expect(page.getByText("Showing 1 to 3 of 3")).toBeVisible();
     const call = api.seen.find((s) => s.path === "/jobs");
     expect(call?.headers.authorization).toBe(tokenOf("access-1"));
     expect(call?.headers["x-anticipa-csrf"]).toBeUndefined();
@@ -142,7 +146,7 @@ test.describe("jobs", () => {
 
   test("status filter sends the status query", async ({ page, context }) => {
     const statuses: (string | null)[] = [];
-    await boot(page, context, "population_admin", {
+    await boot(page, context, "system_admin", {
       "GET /jobs": (_r, url) => {
         statuses.push(url.searchParams.get("status"));
         return { body: paged(jobRows, 1, 25, 3) };
@@ -156,7 +160,7 @@ test.describe("jobs", () => {
 
   test("empty and error states", async ({ page, context }) => {
     let fail = true;
-    await boot(page, context, "population_admin", {
+    await boot(page, context, "system_admin", {
       "GET /jobs": () => (fail ? { ...errorBody("INTERNAL_ERROR", "Database error.", 500) } : { body: paged([], 1, 25, 0) }),
     });
     await page.goto("/jobs");
@@ -169,7 +173,7 @@ test.describe("jobs", () => {
 
   test("detail polls progress and settles on the final state", async ({ page, context }) => {
     let polls = 0;
-    await boot(page, context, "population_admin", {
+    await boot(page, context, "system_admin", {
       [`GET /jobs/${JOB_ID}`]: () => ({ body: ok(polls >= 2 ? job({ id: JOB_ID, status: "completed" }) : job({ id: JOB_ID, status: "running", processed_items: 20, succeeded_items: 20, completed_at: null })) }),
       [`GET /jobs/${JOB_ID}/progress`]: () => {
         polls++;
@@ -186,7 +190,7 @@ test.describe("jobs", () => {
   });
 
   test("admin can retry a failed job (POST with bearer)", async ({ page, context }) => {
-    const { api } = await boot(page, context, "population_admin", {
+    const { api } = await boot(page, context, "system_admin", {
       [`GET /jobs/${FAILED_ID}`]: () => ({ body: ok(jobRows[1]) }),
       [`POST /jobs/${FAILED_ID}/retry`]: () => ({ body: ok(job({ id: FAILED_ID, status: "queued" })) }),
     });
@@ -200,36 +204,51 @@ test.describe("jobs", () => {
     expect(post?.headers.authorization).toBe(tokenOf("access-1"));
   });
 
-  test("observer sees every view page but action buttons are disabled", async ({ page, context }) => {
+  test("the observer role is read only: product pages only, job controls absent", async ({ page, context }) => {
     const { api } = await boot(page, context, "observer", {
       [`GET /jobs/${FAILED_ID}`]: () => ({ body: ok(jobRows[1]) }),
-      [`GET /jobs/${JOB_ID}`]: () => ({ body: ok(jobRows[0]) }),
-      [`GET /jobs/${JOB_ID}/progress`]: () => ({ body: ok(progress()) }),
     });
     await page.goto(`/jobs/${FAILED_ID}`);
+    // system pages are closed to everyone without system.configure, and nothing is fetched for them
+    await expect(page.getByRole("heading", { name: "You do not have access to this page" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Retry job/ })).toHaveCount(0);
     const nav = page.getByRole("navigation", { name: "Primary" });
-    for (const label of ["Population", "Residents", "Evidence Review", "Guidelines", "Care Gaps", "Planning", "Jobs", "Audit", "Integrations"]) {
+    for (const label of ["Command Center", "Population", "Residents", "Care gaps", "Evidence review", "Guidelines", "Capacity planning", "Outreach", "Evaluation"]) {
       await expect(nav.getByRole("link", { name: label })).toBeVisible();
     }
-    const retry = page.getByRole("button", { name: /Retry job/ });
-    await expect(retry).toHaveAttribute("aria-disabled", "true");
-    await expect(retry).toHaveAttribute("title", "Read-only access");
-    await retry.click({ force: true });
+    for (const label of ["Jobs", "Audit", "Integrations", "Live monitor"]) await expect(nav.getByRole("link", { name: label })).toHaveCount(0);
+    await expect(page.getByText("System", { exact: true })).toHaveCount(0);
+    expect(api.seen.filter((x) => x.path.startsWith("/jobs"))).toEqual([]);
+    expect(api.seen.filter((x) => x.method !== "GET")).toEqual([]);
+  });
 
-    await page.goto(`/jobs/${JOB_ID}`);
-    const cancel = page.getByRole("button", { name: /Cancel job/ });
-    await expect(cancel).toHaveAttribute("aria-disabled", "true");
-    await expect(cancel).toHaveAttribute("title", "Read-only access");
-    await cancel.click({ force: true });
-    await expect(page.getByRole("button", { name: /Confirm cancel/ })).toHaveCount(0);
+  test("population admin does not see the System section and system pages are closed to them", async ({ page, context }) => {
+    const { api } = await boot(page, context, "population_admin");
+    await page.goto("/");
+    await expect(page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: "Command Center" })).toBeVisible();
+    await expect(page.getByText("System", { exact: true })).toHaveCount(0);
+    for (const path of ["/jobs", "/audit", "/integrations", "/monitor"]) {
+      await page.goto(path);
+      await expect(page.getByRole("heading", { name: "You do not have access to this page" })).toBeVisible();
+    }
+    expect(api.seen.filter((x) => /^\/(jobs|audit|integrations)/.test(x.path))).toEqual([]);
+  });
 
-    expect(api.seen.filter((s) => s.method !== "GET")).toEqual([]);
+  test("system admin finds Jobs, Audit, Integrations and Live monitor under one System entry", async ({ page, context }) => {
+    await boot(page, context, "system_admin", { "GET /jobs": () => ({ body: paged(jobRows, 1, 25, 3) }) });
+    await page.goto("/");
+    const nav = page.getByRole("navigation", { name: "Primary" });
+    await expect(nav.getByRole("link", { name: "Jobs" })).toHaveCount(0); // main navigation stays product only
+    await page.getByText("System", { exact: true }).click();
+    for (const label of ["Live monitor", "Jobs", "Audit", "Integrations"]) await expect(page.getByRole("link", { name: label, exact: true })).toBeVisible();
+    await page.getByRole("link", { name: "Jobs", exact: true }).click();
+    await expect(page.getByRole("table", { name: "Background jobs" }).getByRole("row")).toHaveCount(4);
   });
 });
 
 test.describe("session refresh", () => {
   test("a 401 refreshes the session once and retries with the new token", async ({ page, context }) => {
-    const { supabase, api } = await boot(page, context, "population_admin", {
+    const { supabase, api } = await boot(page, context, "system_admin", {
       "GET /jobs": (req) =>
         req.headers().authorization === tokenOf("access-1")
           ? { ...errorBody("UNAUTHENTICATED", "Token expired.", 401) }
@@ -244,9 +263,9 @@ test.describe("session refresh", () => {
 
   test("a failed refresh sends the user to /login", async ({ page, context }) => {
     await mockSupabase(page, { refresh: "fail" });
-    await signIn(context, "population_admin");
+    await signIn(context, "system_admin");
     await mockApi(page, {
-      "GET /auth/me": () => ({ body: ok(meFor("population_admin")) }),
+      "GET /auth/me": () => ({ body: ok(meFor("system_admin")) }),
       "GET /jobs": () => ({ ...errorBody("UNAUTHENTICATED", "Token expired.", 401) }),
     });
     await page.goto("/jobs");
@@ -273,5 +292,36 @@ test.describe("evidence quote primitive", () => {
 
     await expect(page.locator("[data-sample=mismatch] figcaption")).toContainText("Offsets do not match the stored quote");
     await expect(page.locator("[data-sample=out-of-range]")).toContainText("outside this document");
+  });
+});
+
+test.describe("google sign-in", () => {
+  test("the login page offers Continue with Google next to email and password", async ({ page }) => {
+    await page.goto("/login");
+    await expect(page.getByRole("button", { name: "Continue with Google" })).toBeVisible();
+    await expect(page.getByLabel("Email")).toBeVisible();
+    await expect(page.getByText("Judges: continue with Google for read only access.")).toBeVisible();
+    await expect(page.getByText(/synthetic/i)).toHaveCount(0);
+  });
+
+  test("Continue with Google starts the OAuth flow with the callback as redirect", async ({ page }) => {
+    await mockSupabase(page);
+    await page.goto("/login");
+    const request = page.waitForRequest((r) => r.url().includes("/auth/v1/authorize"));
+    await page.getByRole("button", { name: "Continue with Google" }).click();
+    const url = new URL((await request).url());
+    expect(url.searchParams.get("provider")).toBe("google");
+    expect(url.searchParams.get("redirect_to")).toBe("http://localhost:3100/auth/callback");
+  });
+
+  test("the callback without a code returns to /login with a clear message", async ({ page }) => {
+    await page.goto("/auth/callback");
+    await expect(page).toHaveURL(/\/login\?error=oauth$/);
+    await expect(alerts(page)).toContainText("Google sign-in did not complete");
+  });
+
+  test("a provider error on the callback returns to /login", async ({ page }) => {
+    await page.goto("/auth/callback?error=access_denied&error_description=denied");
+    await expect(page).toHaveURL(/\/login\?error=oauth$/);
   });
 });

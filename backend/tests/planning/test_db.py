@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import func, inspect, select, text
 
+from anticipa.consent.models import ConsentRecord
 from anticipa.core.models import AuditEvent
 from anticipa.db import Base
 from anticipa.jobs.context import JobContext
@@ -231,3 +233,63 @@ def test_confirmed_cases_are_not_planned_again(sessions, seed_world, new_run):
         assert not s.scalar(select(PlannedAllocation.id).where(PlannedAllocation.planning_run_id == second,
                                                                PlannedAllocation.care_gap_case_id == confirmed_case))  # fmt: skip
         assert s.scalar(select(func.count()).select_from(ClinicService)) > 0
+
+
+# ------------------------------------------------------------------------------------------------ consent (ADR-070)
+def _deny(session, resident_id, *, scope="outreach", channel=None, status="deny", effective_to=None):
+    session.add(ConsentRecord(
+        resident_id=resident_id, scope=scope, status=status, channel=channel, source="coordinator_entry",
+        effective_from=datetime.now(UTC) - timedelta(days=2), effective_to=effective_to, synthetic_status="simulated",
+    ))  # fmt: skip
+
+
+def test_residents_who_opted_out_of_every_channel_are_left_unallocated_with_a_reason(sessions, seed_world, new_run):
+    cases, _ = seed_world(sessions, 120, seats=600)
+    first = new_run(sessions)
+    before = service.execute_run(sessions, first)
+    with sessions() as s:
+        placed_before = set(s.scalars(select(PlannedAllocation.care_gap_case_id).where(PlannedAllocation.planning_run_id == first)))
+    assert len(placed_before) > 20 and before["reason_counts"].get("consent_denied", 0) == 0
+    blanket, every_channel, one_channel, ai_only, expired = (
+        [c.resident_id for c in cases if c.case_id in placed_before][i : i + 2] for i in range(0, 10, 2)
+    )
+    with sessions() as s:
+        for rid in blanket:
+            _deny(s, rid)
+        for rid in every_channel:
+            for ch in ("sms", "whatsapp", "phone_call", "email"):
+                _deny(s, rid, channel=ch)
+        for rid in one_channel:
+            _deny(s, rid, channel="sms")
+        for rid in ai_only:
+            _deny(s, rid, scope="data_use_ai_processing")
+        for rid in expired:
+            _deny(s, rid, effective_to=datetime.now(UTC) - timedelta(hours=1))  # no longer in force
+        s.commit()
+    blocked = set(blanket) | set(every_channel)
+
+    second = new_run(sessions)
+    metrics = service.execute_run(sessions, second)
+    by_case = {c.case_id: c for c in cases}
+    with sessions() as s:
+        un = {u.care_gap_case_id: u for u in s.scalars(select(UnallocatedCase).where(UnallocatedCase.planning_run_id == second))}
+        placed = set(s.scalars(select(PlannedAllocation.care_gap_case_id).where(PlannedAllocation.planning_run_id == second)))
+        audit_ok = s.scalar(select(AuditEvent.id).where(AuditEvent.action == "planning.run.completed", AuditEvent.resource_id == str(second)))
+    consent_cases = {cid for cid, u in un.items() if u.reason_code == "consent_denied"}
+    assert consent_cases == {cid for cid, c in by_case.items() if c.resident_id in blocked}  # exactly the unreachable residents
+    assert len(consent_cases) == 4 and not consent_cases & placed  # never given a seat
+    assert all(un[cid].explanation and un[cid].resident_id in blocked for cid in consent_cases)
+    assert metrics["reason_counts"]["consent_denied"] == 4 and "consent_respected" in metrics["hard_constraints"]["checked"]
+    still = {c.case_id for c in cases if c.resident_id in {*one_channel, *ai_only, *expired}} & placed_before
+    assert still <= placed  # one channel, AI processing only, or an expired opt-out does not stop planning
+    assert audit_ok is not None
+
+    with sessions() as s:  # opting back in (newest record wins) makes the cases plannable again
+        _deny(s, blanket[0], status="permit")
+        s.commit()
+    third = new_run(sessions)
+    service.execute_run(sessions, third)
+    with sessions() as s:
+        reasons = dict(s.execute(select(UnallocatedCase.resident_id, UnallocatedCase.reason_code).where(
+            UnallocatedCase.planning_run_id == third, UnallocatedCase.reason_code == "consent_denied")).all())
+    assert blanket[0] not in reasons and blanket[1] in reasons

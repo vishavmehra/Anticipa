@@ -6,15 +6,17 @@ uses (so lifecycle rules, audit events and the `simulated` labels cannot be bypa
     confirm allocation -> simulated message -> delivery outcome -> resident response -> appointment -> attendance
         -> completion evidence (simulated procedure record) -> verified closure
 
-The outcome of a case is a pure function of (seed, case id, rates): re-running with the same seed reproduces the same
-outcomes, and cases are processed in id order. Nothing is ever sent anywhere.
+The outcome of a case is a pure function of (seed, case id, rates, the resident's consent): re-running with
+the same seed reproduces the same outcomes, and cases are processed in id order. A resident who opted out of
+the drawn channel is contacted on the first permitted one; one who opted out of every channel is skipped
+(ADR-070). Nothing is ever sent anywhere.
 """
 
 from __future__ import annotations
 
 import random
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Self
 
@@ -25,6 +27,7 @@ from sqlalchemy.orm import Session
 from anticipa.caregaps import service as caregaps
 from anticipa.caregaps.models import CareGapCase
 from anticipa.closure import service as closure
+from anticipa.consent import service as consent
 from anticipa.core.audit import Actor
 from anticipa.core.errors import Conflict
 from anticipa.engagement import service as engagement
@@ -149,20 +152,28 @@ def simulate_case(session: Session, case_id: uuid.UUID, allocation_id: uuid.UUID
     slot = session.get(CapacitySlot, alloc.capacity_slot_id)
     if slot is None or slot.start_time <= datetime.now(UTC):
         return None  # a slot that has already started cannot be confirmed or booked
+    state = consent.state_for(session, case.resident_id)  # ADR-070
+    channels = [c for c in SIM_CHANNELS if c in state.permitted_channels]
+    if not channels:  # opted out of every channel the simulation uses: no seat reserved, no message simulated
+        consent.audit_outreach_blocked(session, actor, case.resident_id, None, case_id=case.id,
+                                       stage="simulation", job_id=str(job_id) if job_id else None)
+        return None
     if alloc.allocation_status == "proposed":
         if not scope.confirm_proposed:
             return None
-        try:
-            planning.confirm_allocation(session, alloc.id, actor)
-        except Conflict:  # slot full / closed: the refusal is audited by planning; this case waits for the next plan
+        try:  # reserves the seat and (same transaction) holds the slot via on_allocation_confirmed
+            planning.confirm_allocation(session, alloc.id, actor, source="simulation", job_id=job_id)
+        except Conflict:  # slot full / closed / hold refused: planning audits it; this case waits for the next plan
             return None
     elif alloc.allocation_status != "confirmed":
         return None
     source = {"source": "simulation", "job_id": job_id}
-    # planning only reserved the seat: hold the slot with a proposed appointment and move the case to `planned`
+    # idempotent: planning's confirm already held the slot; this covers allocations that were confirmed without a hold
     appt, _ = engagement.on_allocation_confirmed(session, alloc.id, actor=actor, **source)
 
     outcome = plan_outcome(scope.seed, case.id, scope.rates)
+    if outcome.channel not in channels:  # the drawn channel is opted out: use the first permitted one
+        outcome = replace(outcome, channel=channels[0])
     event = engagement.record_event(
         session, case, channel=outcome.channel, delivery_state="delivered" if outcome.delivered else "failed",
         actor=actor, **source,

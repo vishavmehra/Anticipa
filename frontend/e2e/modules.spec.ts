@@ -1,25 +1,106 @@
 import { expect, test } from "@playwright/test";
-import { ALLOC_ID, CASE_ID, DOCS, FACTS, GUIDELINE_ID, MODULE_HANDLERS, RES_ID, VERSION_ID } from "./fixtures";
+import { ALLOC_ID, APPT_ID, CASE_ID, DOCS, EVID_ID, EVIDENCE, FACTS, GUIDELINE_ID, MODULE_HANDLERS, RES_ID, VERSION_ID } from "./fixtures";
 import { alerts, boot, errorBody, ok, paged } from "./helpers";
 
-const BANNER = "Synthetic data — not for clinical use";
 
-test.describe("population", () => {
-  test("shows measured counts with their basis and 'Not available' for a missing measurement", async ({ page, context }) => {
+test.describe("command center", () => {
+  test("shows live KPIs, priority donut, closure trend, alerts, equity, activity and the population profile", async ({ page, context }) => {
     await boot(page, context, "population_admin", MODULE_HANDLERS);
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Processing coverage" })).toBeVisible();
-    await expect(page.getByText("Dataset syn-20261105-s42, as of 2026-11-05 09:14:31 UTC.")).toBeVisible();
-    await expect(page.getByText("of 1,200 generated residents").first()).toBeVisible();
-    // ai_processed_residents is null in the payload: it must read "Not available", never 0.
-    const ai = page.getByText("AI evidence processed", { exact: true }).locator("xpath=../.."); // label -> header row -> tile
-    await expect(ai).toContainText("Not available");
-    await expect(page.getByRole("note")).toHaveText(BANNER);
+    await expect(page.getByRole("heading", { name: "Population Health Overview", level: 1 })).toBeVisible();
+    const tile = (label: string) => page.getByText(label, { exact: true }).first().locator("xpath=ancestor::div[contains(@class,'card')][1]");
+    await expect(tile("Total population")).toContainText("1,200");
+    await expect(tile("Residents with care gaps")).toContainText("300");
+    await expect(tile("Residents with care gaps")).toContainText("25%");
+    await expect(tile("Open care gaps")).toContainText("320");
+    await expect(tile("Open care gaps")).toContainText("80%");
+    await expect(tile("Closure rate")).toContainText("15%");
+    await expect(tile("Closure rate")).toContainText("60 closed");
+
+    const priority = page.getByRole("list", { name: "Open care gaps by priority" });
+    await expect(priority).toContainText("High");
+    await expect(priority).toContainText("80");
+    await expect(page.getByRole("img", { name: "Care gaps closed per day" })).toBeVisible();
+    await expect(page.getByRole("group", { name: /Map of India coloured by/ })).toBeVisible();
+
+    await expect(page.getByRole("heading", { name: /Active alerts/ })).toContainText("(1)");
+    await expect(page.getByText("Clinic capacity nearly full").first()).toBeVisible();
+    await expect(page.getByText("No data", { exact: true })).toBeVisible(); // a rule without data is not shown as OK
+
+    await expect(page.getByRole("list", { name: "Planning coverage by district" })).toContainText("D07");
+    await expect(page.getByText("30.0 pp")).toBeVisible();
+    // backend internals (jobs, audit activity) are for system administrators only
+    await expect(page.getByText("Caregap status change")).toHaveCount(0);
+    await expect(page.getByText("Failed background jobs")).toHaveCount(0);
+    // owner decision: no synthetic banner or wording in the chrome
+    await expect(page.getByRole("note")).toHaveCount(0);
+    await expect(page.getByRole("navigation", { name: "Primary" })).not.toContainText(/synthetic/i);
+  });
+
+  test("selecting a district in the scope pill filters every widget (the backend takes district= on each call)", async ({ page, context }) => {
+    await boot(page, context, "population_admin", MODULE_HANDLERS);
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Population Health Overview", level: 1 })).toBeVisible();
+    const seen: string[] = [];
+    page.on("request", (r) => {
+      if (/analytics\/(command-center|funnel|programmes)\?/.test(r.url())) seen.push(r.url());
+    });
+    await page.getByLabel("District scope").selectOption("D01");
+    await expect(page.locator(".card", { hasText: "Total population" }).first()).toContainText("Bhopal");
+    await expect(page.getByRole("region", { name: "Programs at a glance" })).toContainText("Bhopal");
+    await expect(page.getByRole("region", { name: "Care gaps by priority" })).toContainText("Bhopal");
+    await expect(page.getByRole("region", { name: "Closure trend" })).toContainText("Bhopal");
+    await expect(page.getByRole("region", { name: "Key takeaways" })).toContainText("Bhopal has");
+    await expect(page.getByRole("region", { name: "District view" })).toContainText("Bhopal, Madhya Pradesh");
+    await expect.poll(() => seen.filter((u) => u.includes("district=D01")).length).toBeGreaterThanOrEqual(3);
+    expect(seen.some((u) => u.includes("analytics/command-center") && u.includes("district=D01"))).toBe(true);
+    expect(seen.some((u) => u.includes("analytics/funnel") && u.includes("district=D01"))).toBe(true);
+    expect(seen.some((u) => u.includes("analytics/programmes") && u.includes("district=D01"))).toBe(true);
+  });
+
+  test("system administrators also see recent activity and the job health rule", async ({ page, context }) => {
+    await boot(page, context, "system_admin", MODULE_HANDLERS);
+    await page.goto("/");
+    await expect(page.getByText("Caregap status change")).toBeVisible();
+    await expect(page.getByText("Failed background jobs").first()).toBeVisible();
+  });
+
+  test("the Population page opens (its content is covered by the features specs)", async ({ page, context }) => {
+    await boot(page, context, "population_admin", MODULE_HANDLERS);
+    await page.goto("/population");
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  });
+
+  test("a limited role sees no district equity and no activity feed", async ({ page, context }) => {
+    await boot(page, context, "care_coordinator", {
+      ...MODULE_HANDLERS,
+      "GET /analytics/command-center": (r, u) => {
+        const base = MODULE_HANDLERS["GET /analytics/command-center"](r, u) as { body: { data: Record<string, unknown> } };
+        return { body: { ...base.body, data: { ...base.body.data, limited: true, restricted: ["equity", "recent_activity"], equity: null, recent_activity: null } } };
+      },
+    });
+    await page.goto("/");
+    await expect(page.getByText("District equity is not available for your role.")).toBeVisible();
+      });
+
+  test("an unavailable endpoint is an honest empty state", async ({ page, context }) => {
+    await boot(page, context, "population_admin", {
+      "GET /analytics/command-center": () => ({ ...errorBody("NOT_FOUND", "The requested resource was not found.", 404) }),
+    });
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Endpoint not yet available" })).toBeVisible();
+    await expect(alerts(page)).toHaveCount(0);
+  });
+
+  test("observers see a Read only access badge, admins do not", async ({ page, context }) => {
+    await boot(page, context, "observer", MODULE_HANDLERS);
+    await page.goto("/");
+    await expect(page.getByText("Read only access").first()).toBeVisible();
   });
 });
 
 test.describe("residents", () => {
-  test("list renders synthetic rows and sends the search query", async ({ page, context }) => {
+  test("list renders rows and sends the search query", async ({ page, context }) => {
     const searches: (string | null)[] = [];
     const { api } = await boot(page, context, "population_admin", {
       ...MODULE_HANDLERS,
@@ -29,17 +110,26 @@ test.describe("residents", () => {
       },
     });
     await page.goto("/residents");
-    const table = page.getByRole("table", { name: "Residents" });
-    await expect(table.getByRole("row")).toHaveCount(4);
-    await expect(table.getByText("Synthetic", { exact: true })).toHaveCount(3);
-    await expect(table.getByText("Arabic")).toBeVisible();
-    await expect(table.getByText("Hindi")).toBeVisible();
-    await expect(page.getByText("1–3 of 1,200")).toBeVisible();
+    const list = page.getByRole("list", { name: "Residents", exact: true });
+    await expect(list.getByRole("listitem")).toHaveCount(3);
+    await expect(list).toContainText("Age 64, Male");
+    await expect(page.getByText("Page 1 of 48")).toBeVisible();
 
-    await page.getByLabel("Search").fill("5a1c");
-    await page.getByRole("button", { name: "Search" }).click();
+    await page.getByLabel("Search", { exact: true }).fill("5a1c");
+    await page.getByRole("button", { name: "Search", exact: true }).click();
     await expect.poll(() => searches.at(-1)).toBe("5a1c");
     expect(api.seen.find((s) => s.path === "/residents")?.headers.authorization).toMatch(/^Bearer /);
+  });
+
+  test("a one-character search is rejected in the form, without calling the API", async ({ page, context }) => {
+    const { api } = await boot(page, context, "population_admin", MODULE_HANDLERS);
+    await page.goto("/residents");
+    await expect(page.getByRole("list", { name: "Residents", exact: true }).getByRole("listitem")).toHaveCount(3);
+    const before = api.seen.filter((s) => s.path === "/residents").length;
+    await page.getByLabel("Search", { exact: true }).fill("a");
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    await expect(alerts(page).filter({ hasText: "at least 2 characters" })).toBeVisible();
+    expect(api.seen.filter((s) => s.path === "/residents").length).toBe(before);
   });
 
   test("detail highlights the exact source span in English, Arabic (RTL) and Devanagari", async ({ page, context }) => {
@@ -58,7 +148,7 @@ test.describe("residents", () => {
     await expect(page.locator('blockquote[lang="hi"]').filter({ has: page.locator("mark") })).toHaveCount(1);
     // The caption reports offsets in the full document, even though only an excerpt is fetched.
     const enStart = DOCS.en.text.indexOf(DOCS.en.quote);
-    await expect(page.getByText(`Characters ${enStart}–${enStart + DOCS.en.quote.length}`)).toBeVisible();
+    await expect(page.getByText(`Characters ${enStart} to ${enStart + DOCS.en.quote.length}`)).toBeVisible();
     // The fourth fact's quote was not found in its source: flagged, not hidden.
     await expect(page.getByText("could not be verified against its source text")).toBeVisible();
     await expect(page.getByRole("button", { name: "Accept" })).toHaveCount(0); // review actions live in the queue, not here
@@ -81,14 +171,16 @@ test.describe("evidence review", () => {
       [`POST /evidence/${FACTS[0].id}/review`]: () => ({ body: ok({ id: FACTS[0].id, validation_status: "accepted" }) }),
     });
     await page.goto("/evidence-review");
-    const cards = page.getByRole("article");
-    await expect(cards).toHaveCount(4);
+    const queue = page.getByRole("list").filter({ has: page.getByRole("button", { name: /Breast cancer/ }) });
+    await expect(queue.getByRole("button")).toHaveCount(4);
     // fact 4's only source is quote_not_found
-    await expect(cards.nth(3).getByRole("button", { name: "Accept" })).toBeDisabled();
-    await expect(cards.nth(3)).toContainText("Accept is unavailable until a quote is verified.");
+    await queue.getByRole("button", { name: /Colorectal cancer/ }).click();
+    await expect(page.getByRole("button", { name: "Accept" })).toBeDisabled();
+    await expect(page.getByText("Accept is unavailable until a quote is verified.")).toBeVisible();
 
-    await cards.nth(0).getByLabel("Review note").fill("Matches the source.");
-    await cards.nth(0).getByRole("button", { name: "Accept" }).click();
+    await queue.getByRole("button", { name: /Breast cancer/ }).first().click();
+    await page.getByLabel("Review note").fill("Matches the source.");
+    await page.getByRole("button", { name: "Accept" }).click();
     await expect.poll(() => api.seen.filter((s) => s.method === "POST").length).toBe(1);
     const post = api.seen.find((s) => s.method === "POST")!;
     expect(post.path).toBe(`/evidence/${FACTS[0].id}/review`);
@@ -105,13 +197,13 @@ test.describe("evidence review", () => {
       },
     });
     await page.goto("/evidence-review");
-    const card = page.getByRole("article").nth(1);
-    await card.getByRole("button", { name: "Reject" }).click();
-    await expect(card.getByRole("alert")).toHaveText("Add a short reason before rejecting.");
+    await page.getByRole("button", { name: /Breast cancer/ }).nth(1).click(); // the Arabic fact
+    await page.getByRole("button", { name: "Reject" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "Add a short reason before rejecting." })).toBeVisible();
     expect(api.seen.filter((s) => s.method === "POST")).toEqual([]);
 
-    await card.getByLabel("Review note").fill("Wrong relative.");
-    await card.getByRole("button", { name: "Reject" }).click();
+    await page.getByLabel("Review note").fill("Wrong relative.");
+    await page.getByRole("button", { name: "Reject" }).click();
     await expect.poll(() => body).toEqual({ decision: "rejected", review_note: "Wrong relative." });
   });
 
@@ -121,22 +213,19 @@ test.describe("evidence review", () => {
       [`POST /evidence/${FACTS[0].id}/review`]: () => ({ ...errorBody("CONFLICT", "This fact was already reviewed.", 409) }),
     });
     await page.goto("/evidence-review");
-    await page.getByRole("article").nth(0).getByRole("button", { name: "Accept" }).click();
+    await page.getByRole("button", { name: "Accept" }).click();
     await expect(alerts(page).filter({ hasText: "The review was not saved" })).toContainText("This fact was already reviewed.");
   });
 
   test("observer sees the queue but every mutating action is disabled", async ({ page, context }) => {
     const { api } = await boot(page, context, "observer", MODULE_HANDLERS);
     await page.goto("/evidence-review");
-    await expect(page.getByRole("article")).toHaveCount(4);
+    await expect(page.getByRole("article")).toHaveCount(1);
     for (const name of ["Accept", "Reject"]) {
-      const buttons = page.getByRole("button", { name: new RegExp(name) });
-      await expect(buttons).toHaveCount(4);
-      for (let i = 0; i < 4; i++) {
-        await expect(buttons.nth(i)).toHaveAttribute("aria-disabled", "true");
-        await expect(buttons.nth(i)).toHaveAttribute("title", "Read-only access");
-      }
-      await buttons.first().click({ force: true });
+      const button = page.getByRole("button", { name: new RegExp(name) });
+      await expect(button).toHaveAttribute("aria-disabled", "true");
+      await expect(button).toHaveAttribute("title", "Read only access");
+      await button.click({ force: true });
     }
     await expect(page.getByLabel("Review note")).toHaveCount(0);
     expect(api.seen.filter((s) => s.method !== "GET")).toEqual([]);
@@ -173,8 +262,17 @@ test.describe("care gaps", () => {
     await expect(history.first()).toContainText("Created as");
     await expect(history.last()).toContainText("Awaiting capacity");
     await expect(page.getByText("Screening interval, version 2")).toBeVisible();
-    await expect(page.getByText("Decided by the versioned rule above, not by an AI model.")).toBeVisible();
-    await expect(page.getByRole("list", { name: "Outreach history" })).toContainText("Simulated");
+    await expect(page.getByText("Decided by the versioned rule, not by an AI model.")).toBeVisible();
+  });
+
+  test("outreach shows the simulated message in its own direction, with the resident's response", async ({ page, context }) => {
+    await boot(page, context, "population_admin", MODULE_HANDLERS);
+    await page.goto(`/care-gaps/${CASE_ID}`);
+    const outreach = page.getByRole("list", { name: "Outreach history" });
+    await expect(outreach).toContainText("Simulated message");
+    await expect(outreach).toContainText("Delivered");
+    await expect(outreach.locator('span[lang="ar"][dir="rtl"]')).toContainText("مرحبا");
+    await expect(outreach).toContainText("Resident response (simulated): Accept");
   });
 
   test("a reviewer changes status; escalation needs a reason; the PATCH carries the bearer token", async ({ page, context }) => {
@@ -189,7 +287,7 @@ test.describe("care gaps", () => {
     await page.goto(`/care-gaps/${CASE_ID}`);
     await page.getByLabel("New status").selectOption("escalated");
     await page.getByRole("button", { name: "Update status" }).click();
-    await expect(page.getByRole("alert").filter({ hasText: "at least 3 characters" })).toBeVisible();
+    await expect(alerts(page).filter({ hasText: "at least 3 characters" })).toBeVisible();
     expect(api.seen.filter((s) => s.method === "PATCH")).toEqual([]);
 
     await page.getByLabel("New status").selectOption("planned");
@@ -198,13 +296,137 @@ test.describe("care gaps", () => {
     expect(api.seen.find((s) => s.method === "PATCH")?.headers.authorization).toMatch(/^Bearer /);
   });
 
-  test("observer cannot change status", async ({ page, context }) => {
+  test("appointments: a coordinator moves a simulated appointment forward", async ({ page, context }) => {
+    let body: unknown = null;
+    await boot(page, context, "care_coordinator", {
+      ...MODULE_HANDLERS,
+      [`GET /care-gaps/${CASE_ID}/completion-evidence`]: () => ({ ...errorBody("FORBIDDEN", "No permission.", 403) }),
+      [`PATCH /appointments/${APPT_ID}/status`]: (req) => {
+        body = req.postDataJSON();
+        return { body: ok({}) };
+      },
+    });
+    await page.goto(`/care-gaps/${CASE_ID}`);
+    const table = page.getByRole("table", { name: "Appointments" });
+    await expect(table.getByRole("row")).toHaveCount(2);
+    await expect(table).toContainText("Simulated booking");
+    await table.getByLabel("New appointment status").selectOption("completed");
+    await table.getByRole("button", { name: "Apply" }).click();
+    await expect.poll(() => body).toEqual({ appointment_status: "completed" });
+  });
+
+  test("completion evidence: submit, verify, then close as completed", async ({ page, context }) => {
+    const posts: { path: string; body: unknown }[] = [];
+    let verified = false;
+    const rec = (path: string, body: unknown) => posts.push({ path, body });
+    await boot(page, context, "population_admin", {
+      ...MODULE_HANDLERS,
+      [`GET /care-gaps/${CASE_ID}/completion-evidence`]: () => ({
+        body: ok(verified ? [{ ...EVIDENCE[0], verification_status: "verified", verified_at: "2026-11-08T09:00:00Z" }] : EVIDENCE),
+      }),
+      [`POST /care-gaps/${CASE_ID}/completion-evidence`]: (req) => {
+        rec("submit", req.postDataJSON());
+        return { body: ok(EVIDENCE[0]) };
+      },
+      [`POST /care-gaps/${CASE_ID}/completion-evidence/${EVID_ID}/review`]: (req) => {
+        rec("review", req.postDataJSON());
+        verified = true;
+        return { body: ok({}) };
+      },
+      [`POST /care-gaps/${CASE_ID}/close`]: (req) => {
+        rec("close", req.postDataJSON());
+        return { body: ok({ outcome: "completed" }) };
+      },
+    });
+    await page.goto(`/care-gaps/${CASE_ID}`);
+    // population_admin holds caregaps.close, so it may submit, review and close.
+    await expect(page.getByRole("table", { name: "Completion evidence" }).getByRole("row")).toHaveCount(2);
+    await expect(page.getByRole("button", { name: "Close case" })).toBeDisabled(); // completed needs verified evidence
+    await expect(page.getByText("Completing a case needs verified completion evidence")).toBeVisible();
+
+    await page.getByLabel("Reference").fill("ab");
+    await page.getByRole("button", { name: "Submit evidence" }).click();
+    await expect(alerts(page).filter({ hasText: "at least 3 characters" })).toBeVisible();
+    await page.getByLabel("Reference").fill("Simulated mammography record 78");
+    await page.getByRole("button", { name: "Submit evidence" }).click();
+    await expect.poll(() => posts.length).toBe(1);
+    expect(posts[0]).toEqual({ path: "submit", body: { source_type: "simulated_procedure_record", evidence_reference: "Simulated mammography record 78" } });
+
+    await page.getByRole("button", { name: "Verify" }).click();
+    await expect.poll(() => posts.some((p) => p.path === "review")).toBe(true);
+    expect(posts.find((p) => p.path === "review")?.body).toEqual({ decision: "verified", note: null });
+
+    await expect(page.getByRole("button", { name: "Close case" })).toBeEnabled();
+    await page.getByLabel("Reason (required)").fill("Mammography attended and verified.");
+    await page.getByRole("button", { name: "Close case" }).click();
+    await expect.poll(() => posts.some((p) => p.path === "close")).toBe(true);
+    expect(posts.find((p) => p.path === "close")?.body).toEqual({ outcome: "completed", reason: "Mammography attended and verified." });
+  });
+
+  test("closing as not completed needs an exception type and reason", async ({ page, context }) => {
+    let body: unknown = null;
+    await boot(page, context, "population_admin", {
+      ...MODULE_HANDLERS,
+      [`POST /care-gaps/${CASE_ID}/close`]: (req) => {
+        body = req.postDataJSON();
+        return { body: ok({}) };
+      },
+    });
+    await page.goto(`/care-gaps/${CASE_ID}`);
+    await page.getByLabel("Outcome").selectOption("closed_not_completed");
+    await page.getByLabel("Exception type").selectOption("unable_to_contact");
+    await page.getByLabel("Reason (required)").fill("Three attempts, no answer.");
+    await page.getByRole("button", { name: "Close case" }).click();
+    await expect.poll(() => body).toEqual({ outcome: "closed_not_completed", reason: "Three attempts, no answer.", exception_type: "unable_to_contact" });
+  });
+
+  test("a closed case shows its outcome instead of the close form", async ({ page, context }) => {
+    await boot(page, context, "population_admin", {
+      ...MODULE_HANDLERS,
+      [`GET /care-gaps/${CASE_ID}`]: (req, url) => {
+        const base = MODULE_HANDLERS[`GET /care-gaps/${CASE_ID}`](req, url) as { body: { data: Record<string, unknown> } };
+        return { body: { ...base.body, data: { ...base.body.data, status: "completed", closed_at: "2026-11-09T09:00:00Z", closure_reason: "Verified mammography.", allowed_transitions: ["reopen"] } } };
+      },
+    });
+    await page.goto(`/care-gaps/${CASE_ID}`);
+    await expect(page.getByText("Verified mammography.").first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "Close case" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Reopen case" })).toBeVisible();
+  });
+
+  test("observer sees the whole case but cannot change, review, submit or close anything", async ({ page, context }) => {
     const { api } = await boot(page, context, "observer", MODULE_HANDLERS);
     await page.goto(`/care-gaps/${CASE_ID}`);
-    const btn = page.getByRole("button", { name: /Update status/ });
-    await expect(btn).toHaveAttribute("aria-disabled", "true");
-    await btn.click({ force: true });
+    await expect(page.getByRole("table", { name: "Completion evidence" }).getByRole("row")).toHaveCount(2);
+    for (const name of [/Update status/, /Apply/, /Verify/, /Reject/, /Submit evidence/, /Close case/]) {
+      const btn = page.getByRole("button", { name });
+      await expect(btn).toHaveAttribute("aria-disabled", "true");
+      await btn.click({ force: true });
+    }
     expect(api.seen.filter((s) => s.method !== "GET")).toEqual([]);
+  });
+});
+
+test.describe("engagement", () => {
+  test("shows the simulated funnel and appointments", async ({ page, context }) => {
+    await boot(page, context, "population_admin", MODULE_HANDLERS);
+    await page.goto("/engagement");
+    await expect(page.getByText("All communications, responses, appointments and outcomes are simulated")).toBeVisible();
+    const delivered = page.getByText("Delivered", { exact: true }).first().locator("xpath=../..");
+    await expect(delivered).toContainText("8");
+    await expect(page.getByRole("table", { name: "Messages by language" })).toContainText("Arabic");
+    const appts = page.getByRole("table", { name: "Appointments", exact: true });
+    await expect(appts.getByRole("row")).toHaveCount(2);
+    await expect(appts).toContainText("Simulated booking");
+  });
+
+  test("an overview that is not available is an honest empty state", async ({ page, context }) => {
+    await boot(page, context, "population_admin", {
+      ...MODULE_HANDLERS,
+      "GET /analytics/engagement": () => ({ ...errorBody("NOT_FOUND", "The requested resource was not found.", 404) }),
+    });
+    await page.goto("/engagement");
+    await expect(page.getByRole("heading", { name: "Endpoint not yet available" })).toBeVisible();
   });
 });
 
@@ -214,7 +436,7 @@ test.describe("planning", () => {
       await page.setViewportSize({ width: w, height: h });
       const { api } = await boot(page, context, "population_admin", {
         ...MODULE_HANDLERS,
-        [`POST /planning/allocations/${ALLOC_ID}/confirm`]: () => ({ body: ok({ newly_confirmed: true, appointment_created: false, allocation: {} }) }),
+        [`POST /planning/allocations/${ALLOC_ID}/confirm`]: () => ({ body: ok({ newly_confirmed: true, appointment_created: true, allocation: {} }) }),
       });
       await page.goto("/planning");
       await page.getByRole("button", { name: "Open run" }).click();
@@ -232,7 +454,7 @@ test.describe("planning", () => {
         await page.getByRole("button", { name: "Confirm allocation" }).click();
         await expect.poll(() => api.seen.filter((s) => s.method === "POST").length).toBe(1);
         expect(api.seen.find((s) => s.method === "POST")?.path).toBe(`/planning/allocations/${ALLOC_ID}/confirm`);
-        await expect(page.getByText("No appointment has been created.")).toBeVisible();
+        await expect(page.getByText("A simulated appointment now holds the slot for the case.")).toBeVisible();
       }
     });
   }
@@ -270,12 +492,12 @@ test.describe("unavailable and failing endpoints", () => {
     await expect(alerts(page)).toContainText("req-test");
     fail = false;
     await page.getByRole("button", { name: "Retry" }).click();
-    await expect(page.getByRole("table", { name: "Residents" }).getByRole("row")).toHaveCount(4);
+    await expect(page.getByRole("list", { name: "Residents", exact: true }).getByRole("listitem")).toHaveCount(3);
   });
 
   test("an empty collection explains what to do next", async ({ page, context }) => {
     await boot(page, context, "population_admin", { "GET /residents": () => ({ body: paged([], 1, 25, 0) }) });
     await page.goto("/residents");
-    await expect(page.getByRole("heading", { name: "No residents have been ingested yet" })).toBeVisible();
+    await expect(page.getByText("No residents have been loaded yet.")).toBeVisible();
   });
 });

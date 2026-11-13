@@ -15,7 +15,7 @@ from .types import RouterError
 @dataclass
 class ProviderHealth:
     provider: str
-    status: str  # ok | degraded | not_configured | <RouterError category>
+    status: str  # ok | degraded | not_configured | disabled | <RouterError category>
     latency_ms: int | None = None
     model_count: int | None = None
     missing_models: list[str] = field(default_factory=list)  # configured ids absent from the live list
@@ -65,5 +65,10 @@ async def check_providers(
         else None
     )
     await probe("anthropic", claude, "ANTHROPIC_API_KEY")
-    await probe("nebius", nebius, "NEBIUS_API_KEY")
+    if "nebius" in settings.enabled_providers:
+        await probe("nebius", nebius, "NEBIUS_API_KEY")
+    else:  # owner decision: Nebius credits are preserved, so health never calls it unless it is opted in
+        out["nebius"] = ProviderHealth("nebius", "disabled", detail="set ANTICIPA_ENABLE_NEBIUS=1 to enable")
+        if nebius is not None:
+            await nebius.aclose()
     return out

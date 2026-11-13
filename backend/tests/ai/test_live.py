@@ -49,10 +49,12 @@ def _only(cfg: RouterConfig, task: str, provider: str, model_id: str) -> RouterC
     return out
 
 
-def _router(cfg: RouterConfig | None = None):
+def _router(cfg: RouterConfig | None = None, *, nebius: bool = False):
     settings = AiSettings()
-    if not (settings.anthropic_api_key and settings.nebius_api_key):
-        pytest.skip("provider keys are not configured in .env")
+    if not settings.anthropic_api_key:
+        pytest.skip("ANTHROPIC_API_KEY is not configured in .env")
+    if nebius and not (settings.nebius_api_key and settings.anticipa_enable_nebius):
+        pytest.skip("Nebius is opt-in (owner credit policy): set ANTICIPA_ENABLE_NEBIUS=1 to run this test")
     sink = InMemorySink()
     router = build_router(settings=settings, config=cfg, sink=sink)
     router.daily_budget_usd = BUDGET
@@ -74,7 +76,9 @@ CASES = [
 @pytest.mark.parametrize(("provider", "model_id"), CASES)
 @pytest.mark.parametrize(("lang", "text"), [("en", NOTE_EN), ("hi", NOTE_HI)])
 async def test_extraction_live(provider, model_id, lang, text):
-    router, sink = _router(_only(load_config(), "evidence.extract", provider, model_id))
+    router, sink = _router(
+        _only(load_config(), "evidence.extract", provider, model_id), nebius=provider == "nebius"
+    )
     try:
         out = await extract_document(router, text, DocumentMeta(document_id=f"live-{lang}", language=lang))
     finally:
@@ -113,7 +117,7 @@ async def test_extraction_live(provider, model_id, lang, text):
 
 @pytest.mark.anyio
 async def test_embedding_live_is_1024_dimensional():
-    router, _ = _router()
+    router, _ = _router(nebius=True)
     try:
         res = await router.embed(EmbedRequest(task="embedding.document", texts=[NOTE_EN, NOTE_HI]))
     finally:
@@ -132,7 +136,7 @@ async def test_embedding_live_is_1024_dimensional():
 @pytest.mark.anyio
 async def test_nebius_honours_json_schema_response_format():
     """Adversarial probe: the prompt asks for a value the schema forbids. Constrained decoding must win."""
-    router, _ = _router()
+    router, _ = _router(nebius=True)
     adapter = router.adapters["nebius"]
     model = router.config.model("nebius", "Qwen/Qwen3-235B-A22B-Instruct-2507")
     assert model.structured_output == "json_schema"

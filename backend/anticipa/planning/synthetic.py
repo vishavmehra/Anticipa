@@ -33,6 +33,10 @@ SERVICE_CATALOGUE: dict[str, tuple[str, int, float]] = {
     "colorectal_screening": ("Colorectal screening", 20, 0.60),
     "mammography": ("Mammography", 30, 0.55),
     "genetic_counselling": ("Genetic counselling referral", 45, 0.20),
+    # India national screening pack: simple checks done at sub centres and health and wellness centres
+    "blood_glucose_check": ("Blood glucose check", 15, 0.95),
+    "oral_cancer_screening": ("Oral cancer screening", 15, 0.85),
+    "clinical_breast_exam": ("Clinical breast examination", 20, 0.80),
 }
 DISTRICTS = tuple(f"D{i:02d}" for i in range(1, 11))  # same codes as datafabric.assign
 LANGUAGES = (("en", 0.60), ("hi", 0.25), ("ar", 0.15))  # same mix as datafabric.assign

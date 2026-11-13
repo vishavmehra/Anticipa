@@ -26,9 +26,9 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $Include = @("backend", "frontend", "scripts", "config", "docker", "docker-compose.yml",
-             ".gitignore", ".gitattributes", ".env.example", "README.md", "walkthrough", "diagrams")
+             ".gitignore", ".gitattributes", ".env.example", "README.md", "LICENSE", "walkthrough", "diagrams")
 $KeepAllUnder = @("walkthrough/", "diagrams/")   # whitelisted folders are published as-is
-$SecretPattern = 'sk-ant-[a-z]{3}-[A-Za-z0-9_-]{10,}|sb_secret_[A-Za-z0-9]{8,}|rnd_[A-Za-z0-9]{10,}|v1\.CmQK[A-Za-z0-9]{10,}'
+$SecretPattern = 'sk-ant-[a-z]{3}-[A-Za-z0-9_-]{10,}|sb_secret_[A-Za-z0-9]{8,}|rnd_[A-Za-z0-9]{10,}|v1\.CmQK[A-Za-z0-9]{10,}|eyJ[A-Za-z0-9_-]{15,}\.eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|sbp_[a-f0-9]{30,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}'
 
 function Invoke-Git {
     # Windows PowerShell 5.1 turns git's informational stderr into errors; capture it and judge by exit code.

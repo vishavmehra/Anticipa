@@ -36,11 +36,11 @@ export function GatedButton({
       type="button"
       className={`${className} cursor-not-allowed opacity-50`}
       aria-disabled="true"
-      title="Read-only access"
+      title="Read only access"
       onClick={(e) => e.preventDefault()}
     >
       {children}
-      <span className="sr-only">: read-only access</span>
+      <span className="sr-only">: read only access</span>
     </button>
   );
 }

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from anticipa.ai.config import RouterConfig, load_config
-from anticipa.ai.testing import make_test_router
+from anticipa.ai.config import RouterConfig
+from anticipa.ai.testing import make_test_router, two_provider_config
 
 
 @pytest.fixture
@@ -15,7 +15,7 @@ def anyio_backend() -> str:
 
 @pytest.fixture
 def cfg() -> RouterConfig:
-    return load_config()
+    return two_provider_config()
 
 
 @pytest.fixture

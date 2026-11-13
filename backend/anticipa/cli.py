@@ -58,7 +58,9 @@ def cmd_seed_users(_args: argparse.Namespace) -> int:
     settings = get_settings()
     try:
         results = seed_users(
-            settings, settings.demo_password.get_secret_value() if settings.demo_password else None
+            settings,
+            settings.demo_password.get_secret_value() if settings.demo_password else None,
+            judge_password=settings.judge_password.get_secret_value() if settings.judge_password else None,
         )
     except SeedError as exc:
         print(f"seed-users: {exc}", file=sys.stderr)

@@ -22,6 +22,8 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PATH="/app/backend/.venv/bin:${PATH}"
 RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin app
 COPY --from=builder /app /app
+# The model router replays repeated answers from /app/data/cache (ephemeral on Render); the non-root user must own it.
+RUN mkdir -p /app/data && chown app:app /app/data
 WORKDIR /app/backend
 USER app
 EXPOSE 8000

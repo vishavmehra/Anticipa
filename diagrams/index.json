@@ -155,7 +155,7 @@
     {
       "id": "16",
       "title": "Deployment topology",
-      "description": "Vercel, Render and Supabase for the judging environment, the GitHub Actions keepalive ping, Docker on a laptop for the full dataset, and the code only GitHub snapshot.",
+      "description": "Vercel, Render and Supabase for the judging environment, an external UptimeRobot monitor checking the API and web app every 5 minutes, Docker on a laptop for the full dataset, and the code only GitHub snapshot.",
       "files": {
         "source": "src/16-deployment-topology.drawio",
         "svg": "16-deployment-topology.svg",

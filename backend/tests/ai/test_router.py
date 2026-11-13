@@ -218,6 +218,16 @@ async def test_cache_replays_without_calling_provider(make_router, tmp_path):
     assert sink.total_cost_usd == first.cost_usd
 
 
+async def test_unwritable_cache_never_fails_a_paid_call(make_router, tmp_path):
+    """A non-root container user cannot create the cache folder: the call still succeeds, uncached."""
+    blocker = tmp_path / "not-a-folder"
+    blocker.write_text("x")  # mkdir under a file raises OSError, like a read-only /app/data
+    nebius = FakeAdapter(ok(GOOD), ok(GOOD))
+    router, _, _ = make_router({"nebius": nebius}, cache=ResponseCache(blocker / "cache"))
+    first, second = await router.generate(req()), await router.generate(req())
+    assert first.output == second.output and not second.cached and len(nebius.calls) == 2
+
+
 async def test_cache_key_covers_prompt_version_messages_and_schema(make_router, tmp_path):
     nebius = FakeAdapter(ok(GOOD), ok(GOOD), ok(GOOD))
     router, _, _ = make_router({"nebius": nebius}, cache=ResponseCache(tmp_path))

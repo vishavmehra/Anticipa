@@ -1,6 +1,6 @@
 """Optional file cache for generate() responses so evaluation reruns replay without re-billing.
 
-Off by default (ANTICIPA_LLM_CACHE=1 enables it). Entries hold only the raw model output and accounting
+On by default (ANTICIPA_LLM_CACHE=0 disables it). Entries hold only the raw model output and accounting
 metadata, never prompts or documents. A hit is re-validated by the router like a fresh response, and the
 key covers the route (candidates/effort/temperature), prompt version, messages and schema, so any change
 to those misses. Synthetic data only; data/ is gitignored."""
@@ -46,13 +46,20 @@ class ResponseCache:
             return None  # missing or corrupt entry == miss
 
     def put(self, key: str, entry: dict[str, Any]) -> None:
+        """Best effort: an unwritable or full disk (a non-root container) must never fail a paid call;
+        any OSError is a skipped write."""
         path = self._path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        except OSError:
+            return
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(entry, fh, ensure_ascii=False, default=str)
             os.replace(tmp, path)  # atomic: concurrent workers never read a half-written entry
+        except OSError:
+            Path(tmp).unlink(missing_ok=True)
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise

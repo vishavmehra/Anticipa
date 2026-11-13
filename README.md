@@ -110,7 +110,7 @@ Screening programmes are our worked examples, not the boundary of the product. A
 
 | Question | Where to look |
 |---|---|
-| **Problem size** | [Why we built it](#why-we-built-it) for the sourced burden. [Cost and scale facts](#cost-and-scale-facts): 200,000 residents, about 1.2 million rule evaluations, 27.1 million clinical records, 116,472 care-gap cases. |
+| **Problem size** | [Why we built it](#why-we-built-it) for the sourced burden. [Cost and scale facts](#cost-and-scale-facts): 200,000 residents, about 1.2 million rule evaluations, 27.1 million clinical records, 196,830 care-gap cases. |
 | **Problem severity** | The same section, plus the safety design: [Safety and trust principles](#safety-and-trust-principles), where a wrong answer in health is treated as a hazard and not as a typo. |
 | **Solution quality** | [What Anticipa does](#what-anticipa-does), [Architecture](#architecture) and [Where the agents are](#where-the-agents-are): a complete loop from reading to verified closure, with deterministic decisions and bounded agents. |
 | **Proven impact** | [Proven impact](#proven-impact) and [Evaluation](#evaluation): measured numbers with the method beside each, a held-out test split run once, and the failed gates published with their causes. |
@@ -215,22 +215,23 @@ Everything below was **measured on synthetic data with the product's own code**.
 | Measured result | Number | How it was measured |
 |---|---|---|
 | Family-history care gaps found by reading notes | **1,858** among 10,000 residents (1,184 genetic counselling referrals, 363 BRCA risk assessments, 311 colorectal family-history cases). Structured records alone found **0**. | The same approved rules run twice in memory: structured records only, then structured records plus facts extracted from notes. |
-| Care gaps that should be flagged, found | Structured records alone: **211 of 577 (37%)**. Reading notes: **562 (97%)**. | Compared with the planted truth of the 1,969-resident development split, all six guidelines. |
-| Repeat invitations stopped | **127** invitations that structured records would send were for screenings already done. Invitations that should not go out fell from **269 to 3** of 4,754 decisions. | Against the planted screening truth, three screening guidelines. |
-| The honest trade | **1,497** invitations are held for review because a note mentions a screening that cannot be dated or confirmed. Against the screening truth, **73 of 111** overdue gaps wait for review instead of an invitation. | Same comparison. Caution costs speed, and we say so. |
+| Care gaps that should be flagged, found | Structured records alone: **1,521 of 1,887 (81%)**. Reading notes: **1,872 (99%)**. | Compared with the planted truth of the 1,969-resident development split, all nine guidelines. |
+| Repeat invitations stopped | **356** invitations that structured records would send were for screenings already done. Invitations that should not go out fell from **269 to 3** of 4,754 decisions. | Against the planted screening truth, three screening guidelines. |
+| The honest trade | **1,995** invitations are held for review, 1,952 of them because a note mentions a screening that cannot be dated or confirmed. Against the screening truth, **73 of 111** overdue gaps wait for review instead of an invitation. | Same comparison. Caution costs speed, and we say so. |
 | Rules reproduce the stored decisions | **60,000 of 60,000** | Recomputed outcome compared with the stored decision. |
 
-### What optimised planning changes (200,000-resident run, 86,988 plannable cases)
+### What optimised planning changes (200,000-resident run, 165,376 plannable cases)
 
 | Measured result | First come first served | OR-Tools CP-SAT |
 |---|---:|---:|
-| Cases placed | 52,352 of 86,988 (60%) | 52,352 of 86,988 (60%) |
-| Gap between best and worst served district | 12.9 points | **1.1 points** |
-| Language coverage gap | 0.48 points | **0.03 points** |
-| Placed in the resident's own district | 70.7% | **74.4%** |
+| Cases placed | 103,523 of 165,376 (62.6%) | **104,048 (62.9%)** |
+| Gap between best and worst served district | 13.2 points | **0.6 points** |
+| Language coverage gap | 0.45 points | **0.06 points** |
+| Placed in the resident's own district | 79.7% | **79.8%** |
+| Median wait | 6.5 days | **6.4 days** |
 | Hard-constraint violations | 0 | 0 |
 
-Seats run out in every screening service, so the optimiser changes **who** gets a seat, not **how many**. We report that plainly: the gain is fairness and proximity, not volume. The solver proved the plan **OPTIMAL** in 18.4 seconds on one machine. Both plans were rebuilt from the same input snapshot (hash recorded).
+Seats run out in most screening services, so the optimiser mainly changes **who** gets a seat: the gain is fairness, with 525 more cases placed. Both plans were rebuilt from the same input snapshot (hash recorded).
 
 ### What the full loop does (2,000 cases sent through READ to CLOSE in simulation)
 
@@ -242,7 +243,7 @@ Seats run out in every screening service, so the optimiser changes **who** gets 
 | Slots over-reserved or over-allocated | 0 and 0 |
 | Problems found by the end-to-end verifier | 0 |
 
-The Command Center shows a **0.7% closure rate** across all 116,472 cases for a simple reason: only these 2,000 cases were pushed through outreach and closure in simulation. We did not inflate it.
+After that verified sample, the whole plan went through the same simulated loop: **104,048** planned cases, **97,865** reminders delivered, **47,374** attended, **40,180** closed as completed with verified evidence and **9,761** closed as not completed with a reason. Across all **196,830** cases that is a **20.8% closure rate** (40,938 completed). Outreach, replies and attendance are simulated; every completion still passed the same evidence check.
 
 ### What the end-to-end run found and fixed
 
@@ -436,7 +437,7 @@ Captured from the running application by automated Playwright runs. Images 1 to 
 | ![The preventive care journey](walkthrough/img/care-journey.png) | ![Evidence and guidelines with a Hindi note](walkthrough/img/evidence-review.png) |
 | **3. Care journey.** The funnel from identification to completion, with cohorts and bottlenecks. | **4. Evidence and guidelines.** A Hindi family-history note, each fact with "Quote verified (exact)", and the rule-by-rule reasoning that led to "Not eligible". |
 | ![Guideline Studio](walkthrough/img/guideline-studio.png) | ![Care planning studio](walkthrough/img/care-planning.png) |
-| **5. Guideline Studio.** Approved versions are locked. Make an editable copy and dry-run it before anyone approves. | **6. Care planning studio.** 52,352 of 86,988 cases placed, with the reason each other case was left out. |
+| **5. Guideline Studio.** Approved versions are locked. Make an editable copy and dry-run it before anyone approves. | **6. Care planning studio.** 104,048 of 165,376 cases placed, with the reason each other case was left out. |
 | ![Ask Anticipa](walkthrough/img/ask-anticipa.png) | ![Resident journey with pedigree](walkthrough/img/resident-pedigree.png) |
 | **7. Ask Anticipa** (test render, fixture data). Answers carry a table, a "How I got this" panel and the model and latency used. | **8. Resident journey and pedigree** (test render, fixture data). The stored relatives, who has cancer history, the quote from the note, and the closure rule. |
 
@@ -686,7 +687,7 @@ Names only. Copy `.env.example` to `.env` and fill in values. Never commit `.env
 | Rule evaluations | **about 1.2 million** (1,211,981) | 200,000 residents against six guidelines, plus an incremental re-run. Stored as 5.0 GB across 1.2 million rows. |
 | Population run time | about 58 minutes, 57.8 residents per second overall | Wall clock on one laptop, measured. We do not claim a faster figure. |
 | Clinical records and documents | 27.1 million records, 434,851 documents | As shown on the Population page for this dataset. |
-| Care-gap cases | **116,472** (582 per 1,000 residents), 71,593 residents with at least one | Six-guideline run. The India pack added 80,358 cases for the first 100,000 full-profile residents. |
+| Care-gap cases | **196,830** in total: 116,472 from the six core guidelines (71,593 residents with at least one) plus 80,358 from the India pack for the first 100,000 full-profile residents | Measured on the 200,000-resident run. |
 | Capacity | 168,045 usable seats across 167 service pools, 10 pilot districts | Simulated clinic capacity. |
 | AI extraction cohort | 10,000 residents, 32,523 notes, 126,371 facts | Fixed cohort, doubles as the evaluation cohort. |
 | **AI cost for that cohort** | **$26.89 total, $0.83 per 1,000 notes** | Includes 650 Sonnet escalations. Estimated from configured prices and **not reconciled with a provider bill**. |

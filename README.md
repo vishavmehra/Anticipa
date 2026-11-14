@@ -49,7 +49,7 @@ The judge account and Google sign-in are both the **observer** role: you can bro
 
 ### Film and walkthrough
 
-**Cinematic film (about 3 minutes):** <!-- FILM_URL -->_Link added with the final submission._
+**▶ Cinematic film (3 min):** [Watch First Light, the story of Anticipa in three minutes](https://github.com/vishavmehra/Anticipa/releases/download/film-v1/anticipa-film.mp4)
 
 **▶ Product walkthrough (31 min):** [Watch the full narrated tour of every dashboard](https://github.com/vishavmehra/Anticipa/releases/download/walkthrough-v1/anticipa-walkthrough.mp4) · [Chapters](walkthrough/README.md)
 
